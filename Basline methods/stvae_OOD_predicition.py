@@ -9,13 +9,15 @@ import torch
 from torch.cuda import is_available as cuda_is_available
 from scipy import sparse
 import os
+from pathlib import Path
 
 data_name = 'pbmc'
+data_path = '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD19.h5ad' # CD14 / CD19
 if data_name == 'pbmc':
-    adata = sc.read_h5ad("/home/wxj/scBranchGAN/datasets/pbmc/pbmc.h5ad")
-    cell_type_key = 'cell_type'
-    condition_key = 'condition'
-    condition = {"case": "stimulated", "control": "control"}
+    adata = sc.read_h5ad(data_path)
+    cell_type_key = 'celltype'
+    condition_key = 'KO_noKO'
+    condition = {"case": "KO", "control": "noKO"}
 elif data_name == 'hpoly':
     adata = sc.read_h5ad("/home/wxj/scBranchGAN/datasets/Hpoly/hpoly.h5ad")
     cell_type_key = 'cell_label'
@@ -29,7 +31,7 @@ elif data_name == 'species':
 else:
     raise Exception("InValid data name")
 
-cell_type_list = adata.obs[cell_type_key].unique().tolist()
+cell_type_list = ['CD14+ Monocyte', 'CD19+ B', 'Dendritic', 'CD56+ NK']
 print(cell_type_list)
 for cell_type in cell_type_list:
     print("=================processing " + cell_type + "=================")
@@ -94,9 +96,11 @@ for cell_type in cell_type_list:
                                  cell_type_key: [cell_type] * len(pred_expression_np)
                                  })
     pred_adata.var_names = adata.var_names
-    if not os.path.exists(f"./{data_name}_pred_data"):
-        os.mkdir(f"./{data_name}_pred_data")
-    pred_adata.write_h5ad(f"./{data_name}_pred_data/pred_adata_{cell_type}.h5ad")
+    
+    save_path = f"./pred_data/stvae/{Path(data_path).stem}_pred"
+    os.makedirs(save_path, exist_ok=True)
+    pred_adata.write_h5ad(f"{save_path}/stvae_pred_{cell_type}.h5ad")
+    
     del cfg
     del model
     del ge_transfer_raw

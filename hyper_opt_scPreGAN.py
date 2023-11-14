@@ -16,6 +16,10 @@ from torch.utils.data import random_split
 from torch import autograd
 from torch import mean, exp, unique, cat, isnan
 from torch import norm as torch_norm
+from sklearn.neighbors import KNeighborsClassifier
+import sklearn.metrics as metrics
+import pandas as pd
+
 
 import torch.nn.functional as F
 import scanpy as sc
@@ -23,11 +27,11 @@ import anndata
 from scipy import sparse
 from ray import tune
 from ray.tune import CLIReporter
-from util import load_anndata
+from util import load_anndata,label_encoder 
 
-from model.Discriminator import Discriminator
-from model.Generator import Generator
-from model.Encoder import Encoder
+from model.Discriminator import Discriminator_AC
+from model.Generator import Generator_AC_layer
+from model.Encoder import Encoder_AC_layer
 
 import warnings
 
@@ -40,17 +44,15 @@ def init_weights(m):
         m.bias.data.fill_(0.01)
 
 
-def create_model(n_features, z_dim, min_hidden_size, use_cuda, use_sn):
-    if use_sn:
-        D_A = Discriminator(n_features=n_features, min_hidden_size=min_hidden_size, out_dim=1)
-        D_B = Discriminator(n_features=n_features, min_hidden_size=min_hidden_size, out_dim=1)
-    else:
-        D_A = Discriminator(n_features=n_features, min_hidden_size=min_hidden_size, out_dim=1)
-        D_B = Discriminator(n_features=n_features, min_hidden_size=min_hidden_size, out_dim=1)
+def create_model(n_features, z_dim, min_hidden_size, n_classes, use_cuda, use_sn, train_flag):
+    D_A = Discriminator_AC(n_features=n_features, min_hidden_size=min_hidden_size, out_dim=1, n_classes=n_classes)
+    D_B = Discriminator_AC(n_features=n_features, min_hidden_size=min_hidden_size, out_dim=1, n_classes=n_classes)
 
-    G_A = Generator(z_dim=z_dim, min_hidden_size=min_hidden_size, n_features=n_features)
-    G_B = Generator(z_dim=z_dim, min_hidden_size=min_hidden_size, n_features=n_features)
-    E = Encoder(n_features=n_features, min_hidden_size=min_hidden_size, z_dim=z_dim)
+    G_A = Generator_AC_layer(z_dim=z_dim, min_hidden_size=min_hidden_size, n_features=n_features, n_classes=n_classes)
+    G_B = Generator_AC_layer(z_dim=z_dim, min_hidden_size=min_hidden_size, n_features=n_features, n_classes=n_classes)
+    E = Encoder_AC_layer(n_features=n_features, min_hidden_size=min_hidden_size, z_dim=z_dim)
+    if not train_flag:
+        return E, G_A, G_B, D_A, D_B
 
     # print("Encoder model:")
     # print(E)
@@ -73,32 +75,7 @@ def create_model(n_features, z_dim, min_hidden_size, use_cuda, use_sn):
 
     return E, G_A, G_B, D_A, D_B
 
-
-def calc_gradient_penalty(netD, real_data, fake_data, batch_size, use_cuda, lambta, use_wgan_div, k=2, p=6):
-    alpha = torch.rand(batch_size, 1)
-    alpha = alpha.expand(real_data.size())
-    alpha = alpha.cuda() if use_cuda else alpha
-
-    interpolates = alpha * real_data + ((1 - alpha) * fake_data)
-
-    if use_cuda:
-        interpolates = interpolates.cuda()
-    interpolates = Variable(interpolates, requires_grad=True)
-
-    disc_interpolates = netD(interpolates)
-
-    gradients = autograd.grad(outputs=disc_interpolates, inputs=interpolates,
-                              grad_outputs=torch.ones(disc_interpolates.size()).cuda() if use_cuda else torch.ones(
-                                  disc_interpolates.size()),
-                              create_graph=True, retain_graph=True, only_inputs=True)[0]
-    if use_wgan_div:
-        gradient_penalty = torch.pow(gradients.norm(2, dim=1), p).mean() * k
-    else:
-        gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * lambta
-    return gradient_penalty
-
-
-def train_BranchGAN(config, opt):
+def train_scPreGAN(config, opt):
     if opt['manual_seed'] is None:
         opt['manual_seed'] = random.randint(1, 10000)
     print("Random Seed: ", opt['manual_seed'])
@@ -109,63 +86,137 @@ def train_BranchGAN(config, opt):
     A_pd, A_celltype_ohe_pd, B_pd, B_celltype_ohe_pd = load_anndata(path=opt['dataPath'],
                                                                     condition_key=opt['condition_key'],
                                                                     condition=opt['condition'],
-                                                                    cell_type_key=opt['cell_type_key']
+                                                                    cell_type_key=opt['cell_type_key'],
+                                                                    prediction_type=opt['prediction_type'],
+                                                                    out_sample_prediction=opt['out_sample_prediction']
                                                                     )
-    A_tensor = Tensor(np.array(A_pd))
-    B_tensor = Tensor(np.array(B_pd))
+    trainA = [np.array(A_pd), np.array(A_celltype_ohe_pd)]  
+    trainB = [np.array(B_pd), np.array(B_celltype_ohe_pd)]
+
+    expr_trainA, cell_type_trainA = trainA
+    expr_trainB, cell_type_trainB = trainB
+
+    expr_trainA_tensor = Tensor(expr_trainA)
+    expr_trainB_tensor = Tensor(expr_trainB)
+    cell_type_trainA_tensor = Tensor(cell_type_trainA)
+    cell_type_trainB_tensor = Tensor(cell_type_trainB)
+
 
     if opt['cuda'] and torch.cuda.is_available():
-        A_tensor = A_tensor.cuda()
-        B_tensor = B_tensor.cuda()
+        # A_tensor = A_tensor.cuda()
+        # B_tensor = B_tensor.cuda()
+        expr_trainA_tensor = expr_trainA_tensor.cuda()
+        expr_trainB_tensor = expr_trainB_tensor.cuda()
+        cell_type_trainA_tensor = cell_type_trainA_tensor.cuda()
+        cell_type_trainB_tensor = cell_type_trainB_tensor.cuda()
 
-    A_Dataset = torch.utils.data.TensorDataset(A_tensor)
-    B_Dataset = torch.utils.data.TensorDataset(B_tensor)
+    A_Dataset = torch.utils.data.TensorDataset(expr_trainA_tensor, cell_type_trainA_tensor)
+    B_Dataset = torch.utils.data.TensorDataset(expr_trainB_tensor, cell_type_trainB_tensor)
 
-    A_pd_val, A_celltype_ohe_pd_val, B_pd_val, B_celltype_ohe_pd_val = load_anndata(path=opt['valid_dataPath'],
-                                                                                    condition_key=opt['condition_key'],
-                                                                                    condition=opt['condition'],
-                                                                                    cell_type_key=opt['cell_type_key']
-                                                                                    )
-    print(f"use validation dataset, lenth of A: {A_pd_val.shape}, lenth of B: {B_pd_val.shape}")
-    A_tensor_val = Tensor(np.array(A_pd_val))
-    B_tensor_val = Tensor(np.array(B_pd_val))
 
-    if opt['cuda'] and torch.cuda.is_available():
-        A_tensor_val = A_tensor_val.cuda()
-        B_tensor_val = B_tensor_val.cuda()
+    if opt['validation'] and opt['valid_dataPath'] is None:
+        print('splite dataset to train subset and validation subset')
+        A_test_abs = int(len(A_Dataset) * 0.8)
+        A_train_subset, A_val_subset = random_split(
+            A_Dataset, [A_test_abs, len(A_Dataset) - A_test_abs])
 
-    A_Dataset_val = torch.utils.data.TensorDataset(A_tensor_val)
-    B_Dataset_val = torch.utils.data.TensorDataset(B_tensor_val)
+        B_test_abs = int(len(B_Dataset) * 0.8)
+        B_train_subset, B_val_subset = random_split(
+            B_Dataset, [B_test_abs, len(B_Dataset) - B_test_abs])
 
-    A_train_loader = torch.utils.data.DataLoader(dataset=A_Dataset,
-                                                 batch_size=int(config['batch_size']),
-                                                 shuffle=True,
-                                                 drop_last=True)
+        A_train_loader = torch.utils.data.DataLoader(dataset=A_train_subset,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
 
-    B_train_loader = torch.utils.data.DataLoader(dataset=B_Dataset,
-                                                 batch_size=int(config['batch_size']),
-                                                 shuffle=True,
-                                                 drop_last=True)
-    A_valid_loader = torch.utils.data.DataLoader(dataset=A_Dataset_val,
-                                                 batch_size=int(config['batch_size']),
-                                                 shuffle=True,
-                                                 drop_last=True)
-    B_valid_loader = torch.utils.data.DataLoader(dataset=B_Dataset_val,
-                                                 batch_size=int(config['batch_size']),
-                                                 shuffle=True,
-                                                 drop_last=True)
+        B_train_loader = torch.utils.data.DataLoader(dataset=B_train_subset,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
+        A_valid_loader = torch.utils.data.DataLoader(dataset=A_val_subset,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
+        B_valid_loader = torch.utils.data.DataLoader(dataset=B_val_subset,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
+    elif opt['validation'] and opt['valid_dataPath'] is not None:
+        A_pd_val, A_celltype_ohe_pd_val, B_pd_val, B_celltype_ohe_pd_val = load_anndata(path=opt['valid_dataPath'],
+                                                                                        condition_key=opt[
+                                                                                            'condition_key'],
+                                                                                        condition=opt['condition'],
+                                                                                        cell_type_key=opt[
+                                                                                            'cell_type_key'])
+
+        print(f"use validation dataset, lenth of A: {A_pd_val.shape}, lenth of B: {B_pd_val.shape}")
+
+        valA = [np.array(A_pd), np.array(A_celltype_ohe_pd)]
+        valB = [np.array(B_pd), np.array(B_celltype_ohe_pd)]
+
+        expr_valA, cell_type_valA = valA
+        expr_valB, cell_type_valB = valB
+
+        expr_valA_tensor = Tensor(expr_valA)
+        expr_valB_tensor = Tensor(expr_valB)
+        cell_type_valA_tensor = Tensor(cell_type_valA)
+        cell_type_valB_tensor = Tensor(cell_type_valB)
+
+        if opt['cuda'] and torch.cuda.is_available():
+            expr_valA_tensor = expr_valA_tensor.cuda()
+            expr_valB_tensor = expr_valB_tensor.cuda()
+            cell_type_valA_tensor = cell_type_valA_tensor.cuda()
+            cell_type_valB_tensor = cell_type_valB_tensor.cuda()
+
+        A_Dataset_val = torch.utils.data.TensorDataset(expr_valA_tensor, cell_type_valA_tensor)
+        B_Dataset_val = torch.utils.data.TensorDataset(expr_valB_tensor, cell_type_valB_tensor)
+
+        A_train_loader = torch.utils.data.DataLoader(dataset=A_Dataset,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
+        B_train_loader = torch.utils.data.DataLoader(dataset=B_Dataset,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
+        A_valid_loader = torch.utils.data.DataLoader(dataset=A_Dataset_val,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
+        B_valid_loader = torch.utils.data.DataLoader(dataset=B_Dataset_val,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
+    else:
+        print('No validation.')
+        A_train_loader = torch.utils.data.DataLoader(dataset=A_Dataset,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
+
+        B_train_loader = torch.utils.data.DataLoader(dataset=B_Dataset,
+                                                     batch_size=int(config['batch_size']),
+                                                     shuffle=True,
+                                                     drop_last=True)
+
+
 
     opt['n_features'] = A_pd.shape[1]
+    n_classes = opt['n_classes']
+    print("feature length: ", opt['n_features'])
     A_train_loader_it = iter(A_train_loader)
     B_train_loader_it = iter(B_train_loader)
 
     E, G_A, G_B, D_A, D_B = create_model(n_features=opt['n_features'],
                                          z_dim=config['z_dim'],
                                          min_hidden_size=config['min_hidden_size'],
-                                         use_cuda=opt['cuda'], use_sn=opt['use_sn'])
+                                         use_cuda=opt['cuda'], use_sn=opt['use_sn'], 
+                                         n_classes=n_classes, train_flag=opt['train_flag'])
 
     recon_criterion = nn.MSELoss()
     encoding_criterion = nn.MSELoss()
+    dis_criterion = nn.BCELoss()
+    aux_criterion = nn.NLLLoss()
 
     optimizerD_A = torch.optim.Adam(D_A.parameters(), lr=config['lr_disc'], betas=(0.5, 0.9))
     optimizerD_B = torch.optim.Adam(D_B.parameters(), lr=config['lr_disc'], betas=(0.5, 0.9))
@@ -204,80 +255,74 @@ def train_BranchGAN(config, opt):
             for param_group in optimizerE.param_groups:
                 param_group['lr'] = param_group['lr'] * 0.9
 
-        for count in range(0, 5):
-            try:
-                real_A = A_train_loader_it.next()[0]
-                real_B = B_train_loader_it.next()[0]
-            except StopIteration:
-                A_train_loader_it, B_train_loader_it = iter(A_train_loader), iter(B_train_loader)
-                real_A = A_train_loader_it.next()[0]
-                real_B = B_train_loader_it.next()[0]
-
-            if (opt['cuda']) and cuda_is_available():
-                real_A = real_A.cuda()
-                real_B = real_B.cuda()
-
-            D_A.zero_grad()
-            D_B.zero_grad()
-
-            out_A = D_A(real_A)
-            out_B = D_B(real_B)
-
-            real_A_z = E(real_A)
-            AB = G_B(real_A_z)
-            real_B_z = E(real_B)
-            BA = G_A(real_B_z)
-
-            out_BA = D_A(BA.detach())
-            out_AB = D_B(AB.detach())
-
-            D_A_gradient_penalty = calc_gradient_penalty(D_A, real_A.detach(), BA.detach(),
-                                                         batch_size=config['batch_size'], use_cuda=opt['cuda'],
-                                                         lambta=config['lambta_gp'], use_wgan_div=opt['use_wgan_div'])
-            D_B_gradient_penalty = calc_gradient_penalty(D_B, real_B.detach(), AB.detach(),
-                                                         batch_size=config['batch_size'], use_cuda=opt['cuda'],
-                                                         lambta=config['lambta_gp'], use_wgan_div=opt['use_wgan_div'])
-
-            if opt['gan_loss'] == 'vanilla':
-                D_A_real_loss = F.binary_cross_entropy_with_logits(out_A, ones)
-                D_B_real_loss = F.binary_cross_entropy_with_logits(out_B, ones)
-                D_A_fake_loss = F.binary_cross_entropy_with_logits(out_BA, zeros)
-                D_B_fake_loss = F.binary_cross_entropy_with_logits(out_AB, zeros)
-                D_A_loss = D_A_real_loss + D_A_fake_loss
-                D_B_loss = D_B_real_loss + D_B_fake_loss
-            elif opt['gan_loss'] == 'lsgan':
-                D_A_real_loss = F.mse_loss(out_A, ones)
-                D_B_real_loss = F.mse_loss(out_B, ones)
-                D_A_fake_loss = F.mse_loss(out_BA, zeros)
-                D_B_fake_loss = F.mse_loss(out_AB, zeros)
-                D_A_loss = D_A_real_loss + D_A_fake_loss
-                D_B_loss = D_B_real_loss + D_B_fake_loss
-            elif opt['gan_loss'] == 'wgan':
-                D_A_real_loss = -torch.mean(out_A)
-                D_B_real_loss = -torch.mean(out_B)
-                D_A_fake_loss = torch.mean(out_BA)
-                D_B_fake_loss = torch.mean(out_AB)
-                D_A_loss = D_A_real_loss + D_A_fake_loss + D_A_gradient_penalty
-                D_B_loss = D_B_real_loss + D_B_fake_loss + D_B_gradient_penalty
-            else:
-                NotImplementedError("not implement loss")
-
-            D_A_loss.backward()
-            D_B_loss.backward()
-            optimizerD_A.step()
-            optimizerD_B.step()
 
         try:
-            real_A = A_train_loader_it.next()[0]
-            real_B = B_train_loader_it.next()[0]
+            real_A, cell_type_A = A_train_loader_it.next()
+            real_B, cell_type_B = B_train_loader_it.next()
         except StopIteration:
             A_train_loader_it, B_train_loader_it = iter(A_train_loader), iter(B_train_loader)
-            real_A = A_train_loader_it.next()[0]
-            real_B = B_train_loader_it.next()[0]
+            real_A, cell_type_A = A_train_loader_it.next()
+            real_B, cell_type_B = B_train_loader_it.next()
 
         if (opt['cuda']) and cuda_is_available():
             real_A = real_A.cuda()
             real_B = real_B.cuda()
+            cell_type_A = cell_type_A.cuda()
+            cell_type_B = cell_type_B.cuda()
+
+        D_A.zero_grad()
+        D_B.zero_grad()
+
+        out_A, out_A_cls = D_A(real_A, cell_type_A) # real A
+        out_B, out_B_cls = D_B(real_B, cell_type_B) # real B
+
+        real_A_z = E(real_A)
+        AB = G_B(real_A_z)
+        
+        real_B_z = E(real_B)
+        BA = G_A(real_B_z)
+
+        out_BA, out_BA_cls = D_A(BA.detach(), cell_type_B) # false A
+        out_AB, out_AB_cls = D_B(AB.detach(), cell_type_A) # false B
+
+        _cell_type_A = torch.argmax(cell_type_A, dim=-1)
+        _cell_type_B = torch.argmax(cell_type_B, dim=-1)
+
+        dis_D_A_real = dis_criterion(out_A, ones)
+        aux_D_A_real = aux_criterion(out_A_cls, _cell_type_A)
+        D_A_real = dis_D_A_real + aux_D_A_real
+        dis_D_A_fake = dis_criterion(out_BA, zeros)
+        aux_D_A_fake = aux_criterion(out_BA_cls, _cell_type_B) 
+        D_A_fake = dis_D_A_fake + aux_D_A_fake
+
+        dis_D_B_real = dis_criterion(out_B, ones)
+        aux_D_B_real = aux_criterion(out_B_cls, _cell_type_B)
+        D_B_real = dis_D_B_real + aux_D_B_real
+        dis_D_B_fake = dis_criterion(out_AB, zeros)
+        aux_D_B_fake = aux_criterion(out_AB_cls, _cell_type_A)
+        D_B_fake = dis_D_B_fake + aux_D_B_fake
+
+        D_A_loss = D_A_real + D_A_fake
+        D_B_loss = D_B_real + D_B_fake
+
+        D_A_loss.backward()
+        D_B_loss.backward()
+        optimizerD_A.step()
+        optimizerD_B.step()     
+
+        try:
+            real_A, cell_type_A = A_train_loader_it.next()
+            real_B, cell_type_B = B_train_loader_it.next()
+        except StopIteration:
+            A_train_loader_it, B_train_loader_it = iter(A_train_loader), iter(B_train_loader)
+            real_A, cell_type_A = A_train_loader_it.next()
+            real_B, cell_type_B = B_train_loader_it.next()
+
+        if (opt['cuda']) and cuda_is_available():
+            real_A = real_A.cuda()
+            real_B = real_B.cuda()
+            cell_type_A = cell_type_A.cuda()
+            cell_type_B = cell_type_B.cuda()
 
         G_A.zero_grad()
         G_B.zero_grad()
@@ -298,41 +343,24 @@ def train_BranchGAN(config, opt):
         BB_z = E(BB)
         BAB = G_B(BA_z)
 
-        out_AA = D_A(AA)
-        out_AB = D_B(AB)
-        out_BA = D_A(BA)
-        out_BB = D_B(BB)
-        out_ABA = D_A(ABA)
-        out_BAB = D_B(BAB)
+        out_AA, out_AA_cls = D_A(AA, cell_type_A)
+        out_AB, out_AB_cls = D_B(AB, cell_type_A)
+        out_BA, out_BA_cls = D_A(BA, cell_type_B)
+        out_BB, out_BB_cls = D_B(BB, cell_type_B)
+        out_ABA, out_ABA_cls = D_A(ABA, cell_type_A)
+        out_BAB, out_BAB_cls = D_B(BAB, cell_type_B)
 
-        if opt['gan_loss'] == 'vanilla':
-            G_AA_adv_loss = F.binary_cross_entropy_with_logits(out_AA, ones)
-            G_BA_adv_loss = F.binary_cross_entropy_with_logits(out_BA, ones)
-            G_ABA_adv_loss = F.binary_cross_entropy_with_logits(out_ABA, ones)
-
-            G_BB_adv_loss = F.binary_cross_entropy_with_logits(out_BB, ones)
-            G_AB_adv_loss = F.binary_cross_entropy_with_logits(out_AB, ones)
-            G_BAB_adv_loss = F.binary_cross_entropy_with_logits(out_BAB, ones)
-        elif opt['gan_loss'] == 'lsgan':
-            G_AA_adv_loss = F.mse_loss(out_AA, ones)
-            G_BA_adv_loss = F.mse_loss(out_BA, ones)
-            G_ABA_adv_loss = F.mse_loss(out_ABA, ones)
-
-            G_BB_adv_loss = F.mse_loss(out_BB, ones)
-            G_AB_adv_loss = F.mse_loss(out_AB, ones)
-            G_BAB_adv_loss = F.mse_loss(out_BAB, ones)
-        elif opt['gan_loss'] == 'wgan':
-            G_AA_adv_loss = -torch.mean(out_AA)
-            G_BA_adv_loss = -torch.mean(out_BA)
-            G_ABA_adv_loss = -torch.mean(out_ABA)
-
-            G_BB_adv_loss = -torch.mean(out_BB)
-            G_AB_adv_loss = -torch.mean(out_AB)
-            G_BAB_adv_loss = -torch.mean(out_BAB)
-        else:
-            NotImplementedError("not implement loss")
+        G_AA_adv_loss = dis_criterion(out_AA, ones) + aux_criterion(out_AA_cls, _cell_type_A)
+        G_BA_adv_loss = dis_criterion(out_BA, ones) + aux_criterion(out_BA_cls, _cell_type_B)
+        G_ABA_adv_loss = dis_criterion(out_ABA, ones) + aux_criterion(out_ABA_cls, _cell_type_A)
+    
+        G_BB_adv_loss = dis_criterion(out_BB, ones) + aux_criterion(out_BB_cls, _cell_type_B)
+        G_AB_adv_loss = dis_criterion(out_AB, ones) + aux_criterion(out_AB_cls, _cell_type_A)
+        G_BAB_adv_loss = dis_criterion(out_BAB, ones) + aux_criterion(out_BAB_cls, _cell_type_B)
+    
         G_A_adv_loss = G_AA_adv_loss + G_BA_adv_loss + G_ABA_adv_loss
         G_B_adv_loss = G_BB_adv_loss + G_AB_adv_loss + G_BAB_adv_loss
+
         adv_loss = (G_A_adv_loss + G_B_adv_loss) * config['lambda_adv']
 
         # reconstruction loss
@@ -352,15 +380,7 @@ def train_BranchGAN(config, opt):
         encoding_loss = (l_encoding_AA + l_encoding_BB + l_encoding_BA + l_encoding_AB) * config[
             'lambda_encoding']
 
-        E_paras = cat([x.view(-1) for x in E.parameters()])
-        G_A_paras = cat([x.view(-1) for x in G_A.parameters()])
-        G_B_paras = cat([x.view(-1) for x in G_B.parameters()])
-        E_regularization = torch_norm(E_paras, 1)
-        G_A_regularization = torch_norm(G_A_paras, 1)
-        G_B_regularization = torch_norm(G_B_paras, 1)
-        l1_regularization = (E_regularization + G_A_regularization + G_B_regularization) * config["lambda_l1_reg"]
-
-        G_loss = adv_loss + recon_loss + encoding_loss + l1_regularization
+        G_loss = adv_loss + recon_loss + encoding_loss
 
         # backward
         G_loss.backward()
@@ -391,10 +411,6 @@ def train_BranchGAN(config, opt):
             G_loss_val = 0.0
 
             counter = 0
-            sparcity_cellA_val = 0.0
-            sparcity_cellB_val = 0.0
-            sparcity_G_A_val = 0.0
-            sparcity_G_B_val = 0.0
 
             A_valid_loader_it = iter(A_valid_loader)
             B_valid_loader_it = iter(B_valid_loader)
@@ -403,12 +419,13 @@ def train_BranchGAN(config, opt):
             with torch.no_grad():
                 for iteration_val in range(1, max_length):
                     try:
-                        cellA_val = A_valid_loader_it.next()[0]
-                        cellB_val = B_valid_loader_it.next()[0]
+                        cellA_val, cellA_val_type = A_valid_loader_it.next()
+                        cellB_val, cellB_val_type = B_valid_loader_it.next()
                     except StopIteration:
                         A_valid_loader_it, B_valid_loader_it = iter(A_valid_loader), iter(B_valid_loader)
-                        cellA_val = A_valid_loader_it.next()[0]
-                        cellB_val = B_valid_loader_it.next()[0]
+                        cellA_val, cellA_val_type = A_valid_loader_it.next()
+                        cellB_val, cellB_val_type = B_valid_loader_it.next()
+
 
                     counter += 1
 
@@ -426,64 +443,43 @@ def train_BranchGAN(config, opt):
                     ABA = G_A(AB_z)
                     BAB = G_B(BA_z)
 
-                    outA_val = D_A(cellA_val)
-                    outB_val = D_B(cellB_val)
-                    out_AA = D_A(AA)
-                    out_BB = D_B(BB)
-                    out_AB = D_B(AB)
-                    out_BA = D_A(BA)
-                    out_ABA = D_A(ABA)
-                    out_BAB = D_B(BAB)
+                    outA_val, outA_val_cls = D_A(cellA_val, cellA_val_type)
+                    outB_val, outB_val_cls = D_B(cellB_val, cellB_val_type)
+                    out_AA, out_AA_cls = D_A(AA, cellA_val_type)
+                    out_BB, out_BB_cls = D_B(BB, cellB_val_type)
+                    out_AB, out_AB_cls = D_B(AB, cellA_val_type)
+                    out_BA, out_BA_cls = D_A(BA, cellB_val_type)
+                    out_ABA, out_ABA_cls = D_A(ABA, cellA_val_type)
+                    out_BAB, out_BAB_cls = D_B(BAB, cellB_val_type)
 
-                    if opt['gan_loss'] == 'vanilla':
-                        D_A_real_loss_val = F.binary_cross_entropy_with_logits(outA_val, ones)
-                        D_B_real_loss_val = F.binary_cross_entropy_with_logits(outB_val, ones)
-                        D_A_fake_loss_val = F.binary_cross_entropy_with_logits(out_BA, zeros)
-                        D_B_fake_loss_val = F.binary_cross_entropy_with_logits(out_AB, zeros)
-                    elif opt['gan_loss'] == 'lsgan':
-                        D_A_real_loss_val = F.mse_loss(outA_val, ones)
-                        D_B_real_loss_val = F.mse_loss(outB_val, ones)
-                        D_A_fake_loss_val = F.mse_loss(out_BA, zeros)
-                        D_B_fake_loss_val = F.mse_loss(out_AB, zeros)
-                    elif opt['gan_loss'] == 'wgan':
-                        D_A_real_loss_val = -torch.mean(outA_val)
-                        D_B_real_loss_val = -torch.mean(outB_val)
-                        D_A_fake_loss_val = torch.mean(out_BA)
-                        D_B_fake_loss_val = torch.mean(out_AB)
+                    _cell_type_A = torch.argmax(cellA_val_type, dim=-1)
+                    _cell_type_B = torch.argmax(cellB_val_type, dim=-1)
 
-                    else:
-                        NotImplementedError("not implement loss")
+                    dis_D_A_real = dis_criterion(outA_val, ones)
+                    aux_D_A_real = aux_criterion(outA_val_cls, _cell_type_A)
+                    D_A_real_loss_val = dis_D_A_real + aux_D_A_real
+                    dis_D_A_fake = dis_criterion(out_BA, zeros) 
+                    aux_D_A_fake = aux_criterion(out_BA_cls, _cell_type_B) 
+                    D_A_fake_loss_val = dis_D_A_fake + aux_D_A_fake
+
+                    dis_D_B_real = dis_criterion(outB_val, ones)
+                    aux_D_B_real = aux_criterion(outB_val_cls, _cell_type_B)
+                    D_B_real_loss_val = dis_D_B_real + aux_D_B_real
+                    dis_D_B_fake = dis_criterion(out_AB, zeros) 
+                    aux_D_B_fake = aux_criterion(out_AB_cls, _cell_type_A) 
+                    D_B_fake_loss_val = dis_D_B_fake + aux_D_B_fake
+
                     D_A_loss_val += (D_A_real_loss_val + D_A_fake_loss_val).item()
                     D_B_loss_val += (D_B_real_loss_val + D_B_fake_loss_val).item()
 
-                    if opt['gan_loss'] == 'vanilla':
-                        G_AA_adv_loss_val = F.binary_cross_entropy_with_logits(out_AA, ones)
-                        G_BA_adv_loss_val = F.binary_cross_entropy_with_logits(out_BA, ones)
-                        G_ABA_adv_loss_val = F.binary_cross_entropy_with_logits(out_ABA, ones)
+                    G_AA_adv_loss_val = dis_criterion(out_AA, ones) + aux_criterion(out_AA_cls, _cell_type_A)
+                    G_BA_adv_loss_val = dis_criterion(out_BA, ones) + aux_criterion(out_BA_cls, _cell_type_B)
+                    G_ABA_adv_loss_val = dis_criterion(out_ABA, ones) + aux_criterion(out_ABA_cls, _cell_type_A)
+                
+                    G_BB_adv_loss_val = dis_criterion(out_BB, ones) + aux_criterion(out_BB_cls, _cell_type_B)
+                    G_AB_adv_loss_val = dis_criterion(out_AB, ones) + aux_criterion(out_AB_cls, _cell_type_A)
+                    G_BAB_adv_loss_val = dis_criterion(out_BAB, ones) + aux_criterion(out_BAB_cls, _cell_type_B)
 
-                        G_BB_adv_loss_val = F.binary_cross_entropy_with_logits(out_BB, ones)
-                        G_AB_adv_loss_val = F.binary_cross_entropy_with_logits(out_AB, ones)
-                        G_BAB_adv_loss_val = F.binary_cross_entropy_with_logits(out_BAB, ones)
-
-                    elif opt['gan_loss'] == 'lsgan':
-                        G_AA_adv_loss_val = F.mse_loss(out_AA, ones)
-                        G_BA_adv_loss_val = F.mse_loss(out_BA, ones)
-                        G_ABA_adv_loss_val = F.mse_loss(out_ABA, ones)
-
-                        G_BB_adv_loss_val = F.mse_loss(out_BB, ones)
-                        G_AB_adv_loss_val = F.mse_loss(out_AB, ones)
-                        G_BAB_adv_loss_val = F.mse_loss(out_BAB, ones)
-
-                    elif opt['gan_loss'] == 'wgan':
-                        G_AA_adv_loss_val = -torch.mean(out_AA)
-                        G_BA_adv_loss_val = -torch.mean(out_BA)
-                        G_ABA_adv_loss_val = -torch.mean(out_ABA)
-
-                        G_BB_adv_loss_val = -torch.mean(out_BB)
-                        G_AB_adv_loss_val = -torch.mean(out_AB)
-                        G_BAB_adv_loss_val = -torch.mean(out_BAB)
-                    else:
-                        NotImplementedError("not implement loss")
                     G_A_adv_loss_val = G_AA_adv_loss_val + G_BA_adv_loss_val + G_ABA_adv_loss_val
                     G_B_adv_loss_val = G_BB_adv_loss_val + G_AB_adv_loss_val + G_BAB_adv_loss_val
                     adv_loss_val += (G_A_adv_loss_val + G_B_adv_loss_val).item() * config['lambda_adv']
@@ -503,254 +499,326 @@ def train_BranchGAN(config, opt):
                                          config['lambda_encoding']
                     G_loss_val += adv_loss_val + recon_loss_val + encoding_loss_val
 
-                    # real data sparsity
-                    cellA_val_np = cellA_val.cpu().detach().numpy()
-                    cellB_val_np = cellB_val.cpu().detach().numpy()
-
-                    cellA_val_zero = cellA_val_np[cellA_val_np <= 0]
-                    cellB_val_zero = cellB_val_np[cellB_val_np <= 0]
-
-                    sparcity_cellA_val += cellA_val_zero.shape[0] / (cellA_val_np.shape[0] * cellA_val_np.shape[1])
-                    sparcity_cellB_val += cellB_val_zero.shape[0] / (cellB_val_np.shape[0] * cellB_val_np.shape[1])
-                    # fake data sparsity
-                    AB_val_np = AB.cpu().detach().numpy()
-                    BA_val_np = BA.cpu().detach().numpy()
-                    AA_val_np = AA.cpu().detach().numpy()
-                    BB_val_np = BB.cpu().detach().numpy()
-
-                    AB_val_zero = AB_val_np[AB_val_np <= 0]
-                    BA_val_zero = BA_val_np[BA_val_np <= 0]
-                    AA_val_zero = AA_val_np[AA_val_np <= 0]
-                    BB_val_zero = BB_val_np[BB_val_np <= 0]
-
-                    sparcity_G_A_val += (BA_val_zero.shape[0] / (BA_val_np.shape[0] * BA_val_np.shape[1])) + \
-                                        (AA_val_zero.shape[0] / (AA_val_np.shape[0] * AA_val_np.shape[1]))
-                    sparcity_G_B_val += (AB_val_zero.shape[0] / (AB_val_np.shape[0] * AB_val_np.shape[1])) + \
-                                        (BB_val_zero.shape[0] / (BB_val_np.shape[0] * BB_val_np.shape[1]))
-
             print(
                 '[%d/%d] adv_loss_val: %.4f  recon_loss_val: %.4f encoding_loss_val: %.4f  G_loss: %.4f D_A_loss_val: %.4f D_B_loss_val: %.4f'
                 % (iteration, config['niter'], adv_loss_val / counter, recon_loss_val / counter,
                    encoding_loss_val / counter, G_loss / counter, D_A_loss_val / counter, D_B_loss_val / counter))
 
-            sparcity_G_A_diff = abs(1 - (sparcity_G_A_val / sparcity_cellA_val))
-            sparcity_G_B_diff = abs(1 - (sparcity_G_B_val / sparcity_cellB_val))
             tune.report(adv_loss_val=(adv_loss_val / counter),
                         recon_loss_val=(recon_loss_val / counter),
                         encoding_loss_val=(encoding_loss_val / counter),
                         G_loss=(G_loss / counter),
                         D_A_loss_val=(D_A_loss_val / counter),
-                        D_B_loss_val=(D_B_loss_val / counter),
-                        sparcity_diff=(sparcity_G_A_diff + sparcity_G_B_diff) * 0.5)
+                        D_B_loss_val=(D_B_loss_val / counter))
+
     with tune.checkpoint_dir(iteration) as checkpoint_dir:
-        path = os.path.join(checkpoint_dir, "checkpoint_E")
+        path = os.path.join(checkpoint_dir, f"checkpoint_E_{opt['prediction_type']}")
         torch.save((E.state_dict(), optimizerE.state_dict()), path)
     with tune.checkpoint_dir(iteration) as checkpoint_dir:
-        path = os.path.join(checkpoint_dir, "checkpoint_G_A")
+        path = os.path.join(checkpoint_dir, f"checkpoint_G_A_{opt['prediction_type']}")
         torch.save((G_A.state_dict(), optimizerG_A.state_dict()), path)
     with tune.checkpoint_dir(iteration) as checkpoint_dir:
-        path = os.path.join(checkpoint_dir, "checkpoint_G_B")
+        path = os.path.join(checkpoint_dir, f"checkpoint_G_B_{opt['prediction_type']}")
         torch.save((G_B.state_dict(), optimizerG_B.state_dict()), path)
     with tune.checkpoint_dir(iteration) as checkpoint_dir:
-        path = os.path.join(checkpoint_dir, "checkpoint_D_A")
+        path = os.path.join(checkpoint_dir, f"checkpoint_D_A_{opt['prediction_type']}")
         torch.save((D_A.state_dict(), optimizerD_A.state_dict()), path)
     with tune.checkpoint_dir(iteration) as checkpoint_dir:
-        path = os.path.join(checkpoint_dir, "checkpoint_D_B")
+        path = os.path.join(checkpoint_dir, f"checkpoint_D_B_{opt['prediction_type']}")
         torch.save((D_B.state_dict(), optimizerD_B.state_dict()), path)
     print("Finished Training")
 
 
-def test(opt, E, G_A, G_B, D_A, D_B, test_dataPath, model_name):
-    print(f"++++++++++++++++++++++{model_name}++++++++++++++++++++++++++++")
-    test_adata = sc.read(test_dataPath)
-    print("shape of test adata: ", test_adata.shape)
-    A_test_adata = test_adata[test_adata.obs[opt['condition_key']] == opt['condition']['control']]
-    B_test_adata = test_adata[test_adata.obs[opt['condition_key']] == opt['condition']['case']]
-    if sparse.issparse(test_adata.X):
-        expr_testA = A_test_adata.X.A
-        expr_testB = B_test_adata.X.A
-    else:
-        expr_testA = A_test_adata.X
-        expr_testB = B_test_adata.X
-    expr_testA_tensor = Tensor(expr_testA)
-    expr_testB_tensor = Tensor(expr_testB)
+def test_results(opt, num_trial, trial_i):
+    print("+++++++++++++++++++++trial " + str(num_trial) + "+++++++++++++++++++++++++++")
+    outf = opt['outf'] + '/trial_' + str(num_trial)
+    adata = sc.read(opt['dataPath'])
+    n_features = adata.shape[1]
+    n_classes = opt['n_classes']
 
-    if opt['cuda'] and cuda_is_available():
-        expr_testA_tensor = expr_testA_tensor.cuda()
-        expr_testB_tensor = expr_testB_tensor.cuda()
-    A_z = E(expr_testA_tensor)
-    B_z = E(expr_testB_tensor)
-    AB = G_B(A_z)
-    BA = G_A(B_z)
-    AB_z = E(AB)
-    BA_z = E(BA)
-    AB_adata = anndata.AnnData(X=AB.cpu().detach().numpy(),
-                               obs={opt['condition_key']: ["transfer_AtoB"] * len(AB),
-                                    opt['cell_type_key']: A_test_adata.obs[opt['cell_type_key']].tolist()})
-    AB_adata.var_names = A_test_adata.var_names
+    # 读取模型，得到全部的预测数据和隐向量数据
+    cell_type_list = adata.obs[opt['cell_type_key']].unique().tolist()
+    for cell_type in cell_type_list:
+        opt['prediction_type'] = cell_type
+        E, G_A, G_B, D_A, D_B = create_model(n_features=n_features,
+                                             z_dim=trial_i.config['z_dim'],
+                                             min_hidden_size=trial_i.config['min_hidden_size'],
+                                             use_cuda=opt['cuda'], use_sn=opt['use_sn'],n_classes=n_classes, train_flag=opt['train_flag'])
 
-    BA_adata = anndata.AnnData(X=BA.cpu().detach().numpy(),
-                               obs={opt['condition_key']: ["transfer_BtoA"] * len(BA),
-                                    opt['cell_type_key']: B_test_adata.obs[opt['cell_type_key']].tolist()})
-    BA_adata.var_names = B_test_adata.var_names
+        checkpoint_dir = trial_i.checkpoint.value
 
-    AA = G_A(A_z)
-    BB = G_B(B_z)
+        E_state, optimizerE_state = torch.load(os.path.join(checkpoint_dir, f"checkpoint_E_{opt['prediction_type']}"))
+        E.load_state_dict(E_state)
+        G_A_state, optimizerG_A_state = torch.load(os.path.join(checkpoint_dir, f"checkpoint_G_A_{opt['prediction_type']}"))
+        G_A.load_state_dict(G_A_state)
+        G_B_state, optimizerG_B_state = torch.load(os.path.join(checkpoint_dir, f"checkpoint_G_B_{opt['prediction_type']}"))
+        G_B.load_state_dict(G_B_state)
+        D_A_state, optimizerD_A_state = torch.load(os.path.join(checkpoint_dir, f"checkpoint_D_A_{opt['prediction_type']}"))
+        D_A.load_state_dict(D_A_state)
+        D_B_state, optimizerD_B_state = torch.load(os.path.join(checkpoint_dir, f"checkpoint_D_B_{opt['prediction_type']}"))
+        D_B.load_state_dict(D_B_state)
 
-    AA_z = E(AA)
-    BB_z = E(BB)
 
-    test_A_z_adata = anndata.AnnData(X=A_z.cpu().detach().numpy(),
-                                     obs={opt['condition_key']: ["test_A_z"] * len(A_z),
-                                          opt['cell_type_key']: A_test_adata.obs[opt['cell_type_key']].tolist()})
-    test_B_z_adata = anndata.AnnData(X=B_z.cpu().detach().numpy(),
-                                     obs={opt['condition_key']: ["test_B_z"] * len(B_z),
-                                          opt['cell_type_key']: B_test_adata.obs[opt['cell_type_key']].tolist()})
-    AA_z_adata = anndata.AnnData(X=AA_z.cpu().detach().numpy(),
-                                 obs={opt['condition_key']: ["AA_z"] * len(AA_z),
-                                      opt['cell_type_key']: A_test_adata.obs[opt['cell_type_key']].tolist()}
-                                 )
-    BB_z_adata = anndata.AnnData(X=BB_z.cpu().detach().numpy(),
-                                 obs={opt['condition_key']: ["BB_z"] * len(BB_z),
-                                      opt['cell_type_key']: B_test_adata.obs[opt['cell_type_key']].tolist()}
-                                 )
+        # 读取相关数据 ############
+        adata = sc.read(opt['dataPath'])
+        control_adata = adata[(adata.obs[opt['cell_type_key']] == opt['prediction_type']) & (
+                adata.obs[opt['condition_key']] == opt['condition']['control'])]
+        case_adata = adata[(adata.obs[opt['cell_type_key']] == opt['prediction_type']) & (
+                adata.obs[opt['condition_key']] == opt['condition']['case'])]        
+        if sparse.issparse(control_adata.X):
+            control_pd = pd.DataFrame(data=control_adata.X.A, index=control_adata.obs_names,
+                                    columns=control_adata.var_names)
+            case_pd = pd.DataFrame(data=case_adata.X.A, index=case_adata.obs_names,
+                                    columns=case_adata.var_names)
+        else:
+            control_pd = pd.DataFrame(data=control_adata.X, index=control_adata.obs_names,
+                                    columns=control_adata.var_names)
+            case_pd = pd.DataFrame(data=case_adata.X, index=case_adata.obs_names,
+                                    columns=case_adata.var_names)
+        
+        encode_attr = adata.obs[opt['cell_type_key']].unique().tolist()
+        adata_celltype_ohe = label_encoder(adata, opt['cell_type_key'], encode_attr)
 
-    AB_z_adata = anndata.AnnData(X=AB_z.cpu().detach().numpy(),
-                                 obs={opt['condition_key']: ["AB_z"] * len(AB_z),
-                                      opt['cell_type_key']: A_test_adata.obs[opt['cell_type_key']].tolist()}
-                                 )
-    BA_z_adata = anndata.AnnData(X=BA_z.cpu().detach().numpy(),
-                                 obs={opt['condition_key']: ["BA_z"] * len(BA_z),
-                                      opt['cell_type_key']: B_test_adata.obs[opt['cell_type_key']].tolist()}
-                                 )
+        adata_celltype_ohe_pd = pd.DataFrame(data=adata_celltype_ohe, index=adata.obs_names)
 
-    AA_adata = anndata.AnnData(X=AA.cpu().detach().numpy(),
-                               obs={opt['condition_key']: ["recon_AtoA"] * len(AA),
-                                    opt['cell_type_key']: A_test_adata.obs[opt['cell_type_key']].tolist()})
-    AA_adata.var_names = A_test_adata.var_names
-    BB_adata = anndata.AnnData(X=BB.cpu().detach().numpy(),
-                               obs={opt['condition_key']: ["recon_BtoB"] * len(BB),
-                                    opt['cell_type_key']: B_test_adata.obs[opt['cell_type_key']].tolist()})
-    BB_adata.var_names = B_test_adata.var_names
+        control_celltype_ohe_pd = adata_celltype_ohe_pd.loc[control_pd.index, :]
+        case_celltype_ohe_pd = adata_celltype_ohe_pd.loc[case_pd.index, :]
 
-    # ============umap plot=========================
-    test_z_adata = test_A_z_adata.concatenate(test_B_z_adata)
-    sc.pp.neighbors(test_z_adata)
-    sc.tl.umap(test_z_adata)
-    sc.pl.umap(test_z_adata, color=[opt['cell_type_key'], opt['condition_key']],
+        control_data = [np.array(control_pd), np.array(control_celltype_ohe_pd)]
+        case_data = [np.array(case_pd), np.array(case_celltype_ohe_pd)]
+
+        expr_control, cell_type_control = control_data
+        expr_case, cell_type_case = case_data
+
+        control_tensor = Tensor(expr_control)
+        cell_type_control_tensor = Tensor(cell_type_control)
+        case_tensor = Tensor(expr_case)
+        cell_type_case_tensor = Tensor(cell_type_case)
+
+        ###################
+
+
+        if opt['cuda'] and cuda_is_available():
+            control_tensor = control_tensor.cuda()
+            cell_type_control_tensor = cell_type_control_tensor.cuda()
+            case_tensor = case_tensor.cuda()
+            cell_type_case_tensor = cell_type_case_tensor.cuda()
+        control_z = E(control_tensor)
+        case_z = E(case_tensor)
+        case_pred = G_B(control_z, cell_type_control_tensor)
+        real_case_pred = G_B(case_z, cell_type_case_tensor)
+
+        # control的隐向量
+        control_z_adata = anndata.AnnData(X=control_z.cpu().detach().numpy(),
+                                          obs={opt['condition_key']: ["control_z"] * len(control_z),
+                                               opt['cell_type_key']: control_adata.obs[opt['cell_type_key']].tolist()})
+
+        if not os.path.exists(os.path.join(outf, 'control_z_adata')):
+            os.makedirs(os.path.join(outf, 'control_z_adata'))
+        control_z_adata.write_h5ad(os.path.join(outf, 'control_z_adata', f'control_z_{opt["prediction_type"]}.h5ad'))
+
+        # 预测数据
+        pred_perturbed_adata = anndata.AnnData(X=case_pred.cpu().detach().numpy(),
+                                               obs={opt['condition_key']: ["pred_perturbed"] * len(case_pred),
+                                                    opt['cell_type_key']: control_adata.obs[opt['cell_type_key']].tolist()})
+        pred_perturbed_adata.var_names = adata.var_names
+        if not os.path.exists(os.path.join(outf, 'pred_adata')):
+            os.makedirs(os.path.join(outf, 'pred_adata'))
+        pred_perturbed_adata.write_h5ad(os.path.join(outf, 'pred_adata', f'pred_{opt["prediction_type"]}.h5ad'))
+
+        # 预测数据的隐向量
+        pred_z = E(case_pred)
+        pred_z_adata = anndata.AnnData(X=pred_z.cpu().detach().numpy(),
+                                       obs={opt['condition_key']: ["pred_z"] * len(pred_z),
+                                            opt['cell_type_key']: pred_perturbed_adata.obs[opt['cell_type_key']].tolist()})
+        if not os.path.exists(os.path.join(outf, 'pred_z_adata')):
+            os.makedirs(os.path.join(outf, 'pred_z_adata'))
+        pred_z_adata.write_h5ad(
+            os.path.join(outf, 'pred_z_adata', f'pred_z_{opt["prediction_type"]}.h5ad'))
+
+    # 读取数据并组合在一起计算各个指标
+
+    # 读取预测的stimulated数据
+    pred_path = outf + "/pred_adata/"
+    B_pred_adata = sc.read(pred_path + "pred_B.h5ad")
+    CD14_Mono_pred_adata = sc.read(pred_path + "pred_CD14+Mono.h5ad")
+    CD4T_pred_adata = sc.read(pred_path + "pred_CD4T.h5ad")
+    CD8T_pred_adata = sc.read(pred_path + "pred_CD8T.h5ad")
+    Dendritic_pred_adata = sc.read(pred_path + "pred_Dendritic.h5ad")
+    FCGR3A_Mono_pred_adata = sc.read(pred_path + "pred_FCGR3A+Mono.h5ad")
+    NK_pred_adata = sc.read(pred_path + "pred_NK.h5ad")
+
+    pred_adata = B_pred_adata.concatenate(CD14_Mono_pred_adata, CD4T_pred_adata, CD8T_pred_adata, Dendritic_pred_adata,
+                                          FCGR3A_Mono_pred_adata, NK_pred_adata)
+
+    all_adata = adata.concatenate(pred_adata)
+
+    sc.pp.neighbors(pred_adata)
+    sc.tl.umap(pred_adata)
+    sc.pl.umap(pred_adata, color=[opt['cell_type_key']],
                wspace=0.4,
                legend_fontsize=14,
-               save=f"test_z_{opt['data_name']}_{model_name}.pdf",
+               save=f"_pred_{num_trial}_{opt['model_name']}.pdf",
                show=False,
                frameon=False)
 
-    z_all_adata = test_A_z_adata.concatenate(test_B_z_adata, AA_z_adata, BB_z_adata, AB_z_adata, BA_z_adata)
-    sc.pp.neighbors(z_all_adata)
-    sc.tl.umap(z_all_adata)
-    sc.pl.umap(z_all_adata,
-               color=[opt['cell_type_key'], opt['condition_key']],
-               wspace=0.4,
-               legend_fontsize=14,
-               save=f"_z_all_adata_{opt['data_name']}_{model_name}.pdf",
-               show=False,
-               frameon=False)
-
-    all_adata = A_test_adata.concatenate(B_test_adata,
-                                         AB_adata, BA_adata,
-                                         AA_adata, BB_adata)
     sc.pp.neighbors(all_adata)
     sc.tl.umap(all_adata)
-    sc.pl.umap(all_adata,
-               color=[opt['condition_key'], opt['cell_type_key']],
+    sc.pl.umap(all_adata, color=[opt['cell_type_key'], opt['condition_key']],
                wspace=0.4,
                legend_fontsize=14,
-               save=f"_all_adata_{opt['data_name']}_{model_name}.pdf",
+               save=f"_all_{num_trial}_{opt['model_name']}.pdf",
                show=False,
                frameon=False)
 
-    AB_stim_control_adata = A_test_adata.concatenate(B_test_adata, AB_adata)
-    sc.pp.neighbors(AB_stim_control_adata)
-    sc.tl.umap(AB_stim_control_adata)
-    sc.pl.umap(AB_stim_control_adata,
-               color=[opt['condition_key'], opt['cell_type_key']],
+    # control数据隐向量
+    control_z_path = outf + "/control_z_adata/"
+    B_control_z_adata = sc.read(control_z_path + "control_z_B.h5ad")
+    CD14_Mono_control_z_adata = sc.read(control_z_path + "control_z_CD14+Mono.h5ad")
+    CD4T_control_z_adata = sc.read(control_z_path + "control_z_CD4T.h5ad")
+    CD8T_control_z_adata = sc.read(control_z_path + "control_z_CD8T.h5ad")
+    Dendritic_control_z_adata = sc.read(control_z_path + "control_z_Dendritic.h5ad")
+    FCGR3A_Mono_control_z_adata = sc.read(control_z_path + "control_z_FCGR3A+Mono.h5ad")
+    NK_control_z_adata = sc.read(control_z_path + "control_z_NK.h5ad")
+
+    control_z = B_control_z_adata.concatenate(CD14_Mono_control_z_adata, CD4T_control_z_adata, CD8T_control_z_adata,
+                                              Dendritic_control_z_adata,
+                                              FCGR3A_Mono_control_z_adata, NK_control_z_adata)
+
+    # 预测数据隐向量
+    pred_z_path = outf + "/pred_z_adata/"
+    B_pred_z_adata = sc.read(pred_z_path + "pred_z_B.h5ad")
+    CD14_Mono_pred_z_adata = sc.read(pred_z_path + "pred_z_CD14+Mono.h5ad")
+    CD4T_pred_z_adata = sc.read(pred_z_path + "pred_z_CD4T.h5ad")
+    CD8T_pred_z_adata = sc.read(pred_z_path + "pred_z_CD8T.h5ad")
+    Dendritic_pred_z_adata = sc.read(pred_z_path + "pred_z_Dendritic.h5ad")
+    FCGR3A_Mono_pred_z_adata = sc.read(pred_z_path + "pred_z_FCGR3A+Mono.h5ad")
+    NK_pred_z_adata = sc.read(pred_z_path + "pred_z_NK.h5ad")
+
+    pred_z = B_pred_z_adata.concatenate(CD14_Mono_pred_z_adata, CD4T_pred_z_adata, CD8T_pred_z_adata,
+                                        Dendritic_pred_z_adata,
+                                        FCGR3A_Mono_pred_z_adata, NK_pred_z_adata)
+
+    pred_control_z = control_z.concatenate(pred_z)
+
+    sc.pp.neighbors(control_z)
+    sc.tl.umap(control_z)
+    sc.pl.umap(control_z, color=[opt['cell_type_key']],
                wspace=0.4,
                legend_fontsize=14,
-               save=f"_AB_stim_control_adata_{opt['data_name']}_{model_name}.pdf",
+               save=f"_ctrl_z_{num_trial}_{opt['model_name']}.pdf",
                show=False,
                frameon=False)
 
-    BA_stim_control_adata = A_test_adata.concatenate(B_test_adata, BA_adata)
-    sc.pp.neighbors(BA_stim_control_adata)
-    sc.tl.umap(BA_stim_control_adata)
-    sc.pl.umap(BA_stim_control_adata,
-               color=[opt['condition_key'], opt['cell_type_key']],
+    sc.pp.neighbors(control_z)
+    sc.tl.umap(control_z)
+    sc.pl.umap(control_z, color=[opt['cell_type_key']],
                wspace=0.4,
                legend_fontsize=14,
-               save=f"_BA_stim_control_adata_{opt['data_name']}_{model_name}.pdf",
+               save=f"_ctrl_z_{num_trial}_{opt['model_name']}.pdf",
                show=False,
                frameon=False)
 
-    # ============DEGs====================
-    cell_types = test_adata.obs[opt['cell_type_key']].unique().tolist()
-    total = 0
-    DEG_path = f'{opt["outf"]}/DEGs'
-    if not os.path.exists(DEG_path):
-        os.makedirs(DEG_path)
-    for t in cell_types:
-        t_A_test_adata = A_test_adata[A_test_adata.obs[opt['cell_type_key']] == t]
-        t_B_test_adata = B_test_adata[B_test_adata.obs[opt['cell_type_key']] == t]
-        t_AB_adata = AB_adata[AB_adata.obs[opt['cell_type_key']] == t]
-        t_BA_adata = BA_adata[BA_adata.obs[opt['cell_type_key']] == t]
-        minCells = min(t_A_test_adata.shape[0], t_B_test_adata.shape[0])
-        t_A_test_adata = t_A_test_adata[0:minCells, ]
-        t_B_test_adata = t_B_test_adata[0:minCells, ]
-        t_AB_adata = t_AB_adata[0:minCells, ]
-        t_BA_adata = t_BA_adata[0:minCells, ]
-        t_test_adata = t_A_test_adata.concatenate(t_B_test_adata)
-        sc.tl.rank_genes_groups(t_test_adata, groupby=opt['condition_key'],
-                                reference=opt['condition']['control'], method='wilcoxon')
-        sc.pl.rank_genes_groups(t_test_adata, n_genes=25, sharey=False)
-        t_test_BtoA_DEGs = (t_test_adata.uns['rank_genes_groups']['names'][0:99]).tolist()
-        t_AB_and_control_adata = t_A_test_adata.concatenate(t_AB_adata)
-        sc.tl.rank_genes_groups(t_AB_and_control_adata, groupby=opt['condition_key'],
-                                reference=opt['condition']['control'], method='wilcoxon')
-        sc.pl.rank_genes_groups(t_AB_and_control_adata, n_genes=25, sharey=False)
-        t_AB_and_control_DEGs = (t_AB_and_control_adata.uns['rank_genes_groups']['names'][0:99]).tolist()
-        t_BtoA_intersec_DEGs = list(set(t_test_BtoA_DEGs).intersection(set(t_AB_and_control_DEGs)))
-        t_BtoA = {
-            f'{t}_BtoA_intersec_length': len(t_BtoA_intersec_DEGs),
-            f'{t}_test_BtoA_DEGs': t_test_BtoA_DEGs,
-            f'{t}_transfer_BtoA_DEGs': t_AB_and_control_DEGs,
-            f'{t}_BtoA_intersec_DEGs': t_BtoA_intersec_DEGs
+
+    sc.pp.neighbors(pred_z)
+    sc.tl.umap(pred_z)
+    sc.pl.umap(pred_z, color=[opt['cell_type_key']],
+               wspace=0.4,
+               legend_fontsize=14,
+               save=f"_pred_z_{num_trial}_{opt['model_name']}.pdf",
+               show=False,
+               frameon=False)
+
+    sc.pp.neighbors(pred_control_z)
+    sc.tl.umap(pred_control_z)
+    sc.pl.umap(pred_control_z, color=[opt['cell_type_key'], opt['condition_key']],
+               wspace=0.4,
+               legend_fontsize=14,
+               save=f"_all_z_{num_trial}_{opt['model_name']}.pdf",
+               show=False,
+               frameon=False)
+
+    # knn acc
+    print("===============knn acc========================")
+    pred_condition = "pred_perturbed"
+    if sparse.issparse(all_adata.X):
+        X_train = all_adata[(all_adata.obs[opt['condition_key']] == opt['condition']['case'])].X.A
+        y_train = (all_adata[(all_adata.obs[opt['condition_key']] == opt['condition']['case'])].obs[opt['cell_type_key']]).tolist()
+        X_test = all_adata[(all_adata.obs[opt['condition_key']] == pred_condition)].X.A
+        y_test = (all_adata[(all_adata.obs[opt['condition_key']] == pred_condition)].obs[opt['cell_type_key']]).tolist()
+    else:
+        X_train = all_adata[(all_adata.obs[opt['condition_key']] == opt['condition']['case'])].X
+        y_train = (
+        all_adata[(all_adata.obs[opt['condition_key']] == opt['condition']['case'])].obs[opt['cell_type_key']]).tolist()
+        X_test = all_adata[(all_adata.obs[opt['condition_key']] == pred_condition)].X
+        y_test = (all_adata[(all_adata.obs[opt['condition_key']] == pred_condition)].obs[opt['cell_type_key']]).tolist()
+    knn = KNeighborsClassifier(n_neighbors=50)
+    knn.fit(X_train, y_train)
+    y_pred = knn.predict(X_test)
+    scores = metrics.accuracy_score(y_test, y_pred)
+    print("knn acc: " + str(scores))
+
+    # DEGs
+    print("===============DEGs========================")
+    cell_type_list = adata.obs[opt['cell_type_key']].unique().tolist()
+    total_DEGs = 0
+    for cell_type in cell_type_list:
+        ctrl_case_adata = adata
+        ctrl_pred_adata = all_adata[(all_adata.obs[opt['cell_type_key']] == cell_type) &
+                                    (all_adata.obs[opt['condition_key']].isin(
+                                        [opt['condition']['control'], pred_condition]))]
+        sc.tl.rank_genes_groups(ctrl_case_adata, groupby=opt['condition_key'], reference=opt['condition']['control'],
+                                method='wilcoxon')
+        sc.tl.rank_genes_groups(ctrl_pred_adata, groupby=opt['condition_key'], reference=opt['condition']['control'],
+                                method='wilcoxon')
+
+        ctrl_case_DEGs = ctrl_case_adata.uns['rank_genes_groups']['names'][opt['condition']['case']][0:100].tolist()
+        ctrl_pred_DEGs = ctrl_pred_adata.uns['rank_genes_groups']['names'][pred_condition][0:100].tolist()
+        same_DEGs = list(set(ctrl_case_DEGs).intersection(set(ctrl_pred_DEGs)))
+        print("number of same DEGs for " + cell_type + ": " + str(len(same_DEGs)))
+        total_DEGs += len(same_DEGs)
+    print("number of total same DEGs: " + str(total_DEGs))
+
+
+def train_whole(config, opt):
+    adata = sc.read(opt['dataPath'])
+    cell_type_list = adata.obs[opt['cell_type_key']].unique().tolist()
+    print("cell type list: " + str(cell_type_list))
+    for cell_type in cell_type_list:
+        # print("=================" + cell_type + "=========================")
+        opt['prediction_type'] = cell_type
+        if not os.path.exists(opt['outf']):
+            os.makedirs(opt['outf'])
+        train_scPreGAN(config, opt)
+
+
+def main(data_name, num_samples=10, gpus_per_trial=0):
+    #os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
+    if data_name == 'pbmc':
+        opt = {
+            'cuda': True,
+            'dataPath': '/home/wxj/scPreGAN-reproducibility/datasets/pbmc/pbmc-2000hvg.h5ad',
+            'checkpoint_dir': None,
+            'condition_key': 'condition',
+            'condition': {"case": "stimulated", "control": "control"},
+            'cell_type_key': 'cell_type',
+            'prediction_type': None,
+            'out_sample_prediction': True,
+            'manual_seed': 3060,
+            'data_name': 'pbmc',
+            'model_name': 'pbmc_OOD_2000hvg_re',
+            'outf': '/home/wxj/scPreGAN-reproducibility/datasets/pbmc/pbmc_OOD_AC_layer_S',
+            'validation': False,
+            'valid_dataPath': None,
+            'use_sn': True,
+            'use_wgan_div': True,
+            'gan_loss': 'wgan',
+            'train_flag': False,
+            'n_classes': 7,
         }
-        with open(Path(opt['outf']) / f'DEGs/{model_name}_{t}_BtoA.json', 'w') as file:
-            json.dump(t_BtoA, file, indent=4)
-        print("===============DEGs========================")
-        print(
-            f"the length of same DEGS between transfered(AB, control) and real(case, control) for cell type {t}: {len(t_BtoA_intersec_DEGs)} ")
-        total += len(t_BtoA_intersec_DEGs)
-    print(f"total same DEGs: {total}")
-
-
-def main(num_samples=10, gpus_per_trial=0):
-    opt = {
-        'cuda': True,
-        'dataPath': '/home/wxj/scPreGAN/datasets/train_pbmc.h5ad',
-        'valid_dataPath': '/home/wxj/scPreGAN/datasets/valid_pbmc.h5ad',
-        'checkpoint_dir': None,
-        'condition_key': 'condition',
-        'condition': {"case": "stimulated", "control": "control"},
-        'cell_type_key': 'cell_type',
-        'manual_seed': 3060,
-        'data_name': 'pbmc',
-        'model_name': 'sn_lsgan',
-        'outf': '/home/wxj/scPreGAN/datasets/pbmc_opt',
-        'test_path': '/home/wxj/scPreGAN/datasets/valid_pbmc.h5ad',
-        'use_sn': True,
-        'use_wgan_div': True,
-        'gan_loss': 'wgan'
-
-    }
+    else:
+        NotImplementedError()
 
     if cuda_is_available():
         try:
@@ -760,64 +828,44 @@ def main(num_samples=10, gpus_per_trial=0):
         cudnn.benchmark = True
 
     config = {
-        "lr_disc": tune.choice([0.01, 0.001, 0.0001]),
-        "lr_e": tune.choice([0.01, 0.001, 0.0001, 0.00005]),
-        "lr_g": tune.choice([0.01, 0.001, 0.0001, 0.00005]),
-        "lambda_adv": tune.choice([1, 0.1, 0.01, 0.001]),
-        "lambda_recon": tune.choice([1, 0.1, 0.01, 0.001]),
-        "lambda_encoding": tune.choice([0.1, 0.01, 0.001, 0.0001]),
-        "lambta_gp": tune.choice([1, 0.1, 0.01, 0.001, 0.0001]),
-        "lambda_l1_reg": tune.choice([0]),
-        "min_hidden_size": tune.choice([256, 128, 64]),
-        "batch_size": tune.choice([64, 256, 128]),
+        "lr_disc": tune.choice([0.001]),
+        # "lr_e": tune.choice([0.001, 0.0001]),
+        "lr_e": tune.choice([0.0001]),
+        "lr_g": tune.choice([0.001]),
+        "lambda_adv": tune.choice([0.1, 0.01, 0.001]),
+        "lambda_recon": tune.choice([0.1, 1]),
+        "lambda_encoding": tune.choice([1, 0.1]),
+        "lambta_gp": tune.choice([0.1]),
+        # "lambda_l1_reg": tune.choice([0]),
+        "min_hidden_size": tune.choice([256]),
+        "batch_size": tune.choice([64]),
         "z_dim": tune.choice([16, 32, 64, 128]),
-        "niter": tune.choice([5000, 10000, 20000, 30000, 40000])
-
+        # "z_dim": tune.choice([16]),
+        "niter": tune.choice([20000]
+        )
     }
+
     if not os.path.exists(opt['outf']):
         os.makedirs(opt['outf'])
     reporter = CLIReporter(metric_columns=["D_A_loss", "D_B_loss", "adv_loss", "recon_loss", "encoding_loss", "G_loss",
                                            "adv_loss_val", "recon_loss_val", "encoding_loss_val", "G_loss",
-                                           "D_A_loss_val", "D_B_loss_val",
-                                           "sparcity_diff", "training_iteration"])
+                                           "D_A_loss_val", "D_B_loss_val", "training_iteration"])
 
     result = tune.run(
-        partial(train_BranchGAN, opt=opt),
+        partial(train_whole, opt=opt),
         name="hyper_scPreGAN",
         resources_per_trial={"cpu": 8, "gpu": gpus_per_trial},
         config=config,
         num_samples=num_samples,
         progress_reporter=reporter)
 
-    A_pd, A_celltype_ohe_pd, B_pd, B_celltype_ohe_pd = load_anndata(path=opt['dataPath'],
-                                                                    condition_key=opt['condition_key'],
-                                                                    condition=opt['condition'],
-                                                                    cell_type_key=opt['cell_type_key'])
-    n_features = A_pd.shape[1]
+    # train = sc.read(opt['dataPath'])
+    # n_features = train.shape[1]
 
     for i in range(0, num_samples):
         print("============the ", i, "th trial:========================")
-        print(result.trials[i].config)
         trial_i = result.trials[i]
-
-        E, G_A, G_B, D_A, D_B = create_model(n_features=n_features,
-                                             z_dim=trial_i.config['z_dim'],
-                                             min_hidden_size=trial_i.config['min_hidden_size'],
-                                             use_cuda=opt['cuda'], use_sn=opt['use_sn'])
-        checkpoint_dir = trial_i.checkpoint.value
-        E_state, optimizerE_state = torch.load(os.path.join(checkpoint_dir, "checkpoint_E"))
-        E.load_state_dict(E_state)
-        G_A_state, optimizerG_A_state = torch.load(os.path.join(checkpoint_dir, "checkpoint_G_A"))
-        G_A.load_state_dict(G_A_state)
-        G_B_state, optimizerG_B_state = torch.load(os.path.join(checkpoint_dir, "checkpoint_G_B"))
-        G_B.load_state_dict(G_B_state)
-        D_A_state, optimizerD_A_state = torch.load(os.path.join(checkpoint_dir, "checkpoint_D_A"))
-        D_A.load_state_dict(D_A_state)
-        D_B_state, optimizerD_B_state = torch.load(os.path.join(checkpoint_dir, "checkpoint_D_B"))
-        D_B.load_state_dict(D_B_state)
-
-        opt['batch_size'] = trial_i.config['batch_size']
-        test(opt, E, G_A, G_B, D_A, D_B, opt['test_path'], f'{opt["model_name"]}_trial_{i}')
+        test_results(opt, i, trial_i)
 
 
 if __name__ == "__main__":
@@ -826,4 +874,4 @@ if __name__ == "__main__":
         mp.set_start_method('spawn')
     except RuntimeError:
         pass
-    main(num_samples=50, gpus_per_trial=1)
+    main(data_name='pbmc', num_samples=10, gpus_per_trial=1)

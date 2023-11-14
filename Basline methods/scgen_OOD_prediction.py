@@ -3,16 +3,19 @@ import logging
 import scanpy as sc
 import scgen
 import os
+from pathlib import Path
 
 logger = logging.getLogger("scvi.inference.autotune")
 logger.setLevel(logging.WARNING)
 
+data_path = '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD19.h5ad' # CD19 / CD14 
 data_name = "pbmc"
 if data_name == "pbmc":
-    train = sc.read("/home/wxj/scBranchGAN/datasets/pbmc/pbmc.h5ad")
-    cell_type_key = "cell_type"
-    condition_key = "condition"
-    condition = {"case": "stimulated", "control": "control"}
+    # train = sc.read("datasets/train_pbmc.h5ad")
+    train = sc.read(data_path)
+    cell_type_key = "celltype"
+    condition_key = "KO_noKO"
+    condition = {"case": "KO", "control": "noKO"}
 elif data_name == 'hpoly':
     train = sc.read("/home/wxj/scBranchGAN/datasets/Hpoly/hpoly.h5ad")
     cell_type_key = 'cell_label'
@@ -27,7 +30,7 @@ else:
     raise Exception("InValid data name")
 
 cell_type_list = train.obs[cell_type_key].unique().tolist()
-for cell_type in cell_type_list[6:]:
+for cell_type in ['CD14+ Monocyte', 'CD19+ B', 'Dendritic', 'CD56+ NK']:
     print("=================processing " + cell_type + "=================")
     train_new = train[~((train.obs[cell_type_key] == cell_type) &
                         (train.obs[condition_key] == condition["case"]))]
@@ -37,6 +40,7 @@ for cell_type in cell_type_list[6:]:
     pred_adata, delta = model.predict(ctrl_key=condition["control"], stim_key=condition["case"],
                                       celltype_to_predict=cell_type)
     pred_adata.obs['condition'] = 'pred_perturbed'
-    if not os.path.exists(f"./{data_name}_pred_data"):
-        os.mkdir(f"./{data_name}_pred_data")
-    pred_adata.write_h5ad(f"./{data_name}_pred_data/pred_adata_{cell_type}.h5ad")
+    
+    save_path = f"./pred_data/scgen/{Path(data_path).stem}_pred"
+    os.makedirs(save_path, exist_ok=True)
+    pred_adata.write_h5ad(f"{save_path}/scgen_pred_{cell_type}.h5ad")
