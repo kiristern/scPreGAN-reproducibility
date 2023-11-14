@@ -623,7 +623,7 @@ def train_scPreGAN(config, opt):
 
     # 真实case预测
     real_perturbed_adata = anndata.AnnData(X=real_case_pred.cpu().detach().numpy(),
-                                           obs={opt['condition_key']: ["pred_perturbed"] * len(real_case_pred),
+                                           obs={opt['condition_key']: ["real_perturbed"] * len(real_case_pred),
                                                 opt['cell_type_key']: case_adata.obs[opt['cell_type_key']].tolist()})
     real_perturbed_adata.var_names = adata.var_names
     if not os.path.exists(os.path.join(opt['outf'], 'real_case_adata')):
