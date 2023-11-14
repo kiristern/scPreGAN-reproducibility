@@ -635,19 +635,19 @@ def train_scPreGAN(config, opt):
                                            obs={opt['condition_key']: ["pred_perturbed"] * len(case_pred),
                                                 opt['cell_type_key']: control_adata.obs[opt['cell_type_key']].tolist()})
     pred_perturbed_adata.var_names = adata.var_names
-    if not os.path.exists(os.path.join(opt['outf'], 'pred_adata/scpGAN/')):
-        os.makedirs(os.path.join(opt['outf'], 'pred_adata/scpGAN/'))
-    pred_perturbed_adata.write_h5ad(os.path.join(opt['outf'], 'pred_adata/scpGAN/', f'scpGAN_pred_{opt["prediction_type"]}.h5ad'))
+    if not os.path.exists(os.path.join(opt['outf'], 'pred_adata/')):
+        os.makedirs(os.path.join(opt['outf'], 'pred_adata/'))
+    pred_perturbed_adata.write_h5ad(os.path.join(opt['outf'], 'pred_adata/', f'scpGAN_pred_{opt["prediction_type"]}.h5ad'))
 
     # 预测数据的隐向量
     pred_z = E(case_pred)
     pred_z_adata = anndata.AnnData(X=pred_z.cpu().detach().numpy(),
                                    obs={opt['condition_key']: ["pred_z"] * len(pred_z),
                                         opt['cell_type_key']: pred_perturbed_adata.obs[opt['cell_type_key']].tolist()})
-    if not os.path.exists(os.path.join(opt['outf'], 'pred_adata/scpGAN/pred_z_adata')):
-        os.makedirs(os.path.join(opt['outf'], 'pred_adata/scpGAN/pred_z_adata'))
+    if not os.path.exists(os.path.join(opt['outf'], '/pred_z_adata')):
+        os.makedirs(os.path.join(opt['outf'], '/pred_z_adata'))
     pred_z_adata.write_h5ad(
-        os.path.join(opt['outf'], 'pred_adata/scpGAN/pred_z_adata', f'scpGAN_pred_z_{opt["prediction_type"]}.h5ad'))
+        os.path.join(opt['outf'], '/pred_z_adata', f'scpGAN_pred_z_{opt["prediction_type"]}.h5ad'))
 
 
 def main(data_name):
@@ -655,7 +655,7 @@ def main(data_name):
         opt = {
             'cuda': True,
             'dataPath': '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD19.h5ad', # CD14 / CD19
-            'checkpoint_dir': 'scPreGAN_chkp_cd19/', # cd14 / cd19
+            'checkpoint_dir': None, #'scPreGANac_chkp_cd19/', # cd14 / cd19
             'condition_key': 'KO_noKO',
             'condition': {"case": "KO", "control": "noKO"},
             'cell_type_key': 'celltype',
@@ -664,7 +664,7 @@ def main(data_name):
             'manual_seed': 3060,
             'data_name': 'pbmc',
             'model_name': 'pbmc_OOD',
-            'outf': 'scPreGAN_predcd19/', # cd14 / cd19
+            'outf': 'scPreGANac_predcd19_temp/', # cd14 / cd19
             'validation': False,
             'valid_dataPath': None,
             'use_sn': True,

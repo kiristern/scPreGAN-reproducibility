@@ -8,8 +8,8 @@ scpGAN_original/
 scPreGAN_chkp_cd14/
 scPreGAN_chkp_cd19/
 scPreGAN_pred/
-scPreGAN_predcd14/
-scPreGAN_predcd19/
+scPreGANac_predcd14/
+scPreGANac_predcd19/
 stvae/
 stvae-source/
 stvae3.7/
