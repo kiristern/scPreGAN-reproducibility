@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 data_name = 'pbmc'
-data_path = '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD19.h5ad' # CD14 / CD19
+data_path = '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD14.h5ad' # CD14 / CD19
 if data_name == 'pbmc':
     adata = sc.read_h5ad(data_path)
     cell_type_key = 'celltype'

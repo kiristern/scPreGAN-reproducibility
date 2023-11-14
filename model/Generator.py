@@ -21,7 +21,7 @@ class Generator(nn.Module):
         return out
 
 class Generator_AC_layer(nn.Module):
-    def __init__(self, z_dim, min_hidden_size, n_features):
+    def __init__(self, z_dim, min_hidden_size, n_features, n_classes=None):
         super(Generator_AC_layer, self).__init__()
         self.layer1 = nn.Sequential(nn.Linear(z_dim , min_hidden_size),#+ n_classes
                                     nn.LayerNorm(min_hidden_size),

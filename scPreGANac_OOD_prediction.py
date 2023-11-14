@@ -623,7 +623,7 @@ def train_scPreGAN(config, opt):
 
     # 真实case预测
     real_perturbed_adata = anndata.AnnData(X=real_case_pred.cpu().detach().numpy(),
-                                           obs={opt['condition_key']: ["real_perturbed"] * len(real_case_pred),
+                                           obs={opt['condition_key']: ["real_case_pred"] * len(real_case_pred),
                                                 opt['cell_type_key']: case_adata.obs[opt['cell_type_key']].tolist()})
     real_perturbed_adata.var_names = adata.var_names
     if not os.path.exists(os.path.join(opt['outf'], 'real_case_adata')):
@@ -644,17 +644,17 @@ def train_scPreGAN(config, opt):
     pred_z_adata = anndata.AnnData(X=pred_z.cpu().detach().numpy(),
                                    obs={opt['condition_key']: ["pred_z"] * len(pred_z),
                                         opt['cell_type_key']: pred_perturbed_adata.obs[opt['cell_type_key']].tolist()})
-    if not os.path.exists(os.path.join(opt['outf'], '/pred_z_adata')):
-        os.makedirs(os.path.join(opt['outf'], '/pred_z_adata'))
+    if not os.path.exists(os.path.join(opt['outf'], 'pred_z_adata/')):
+        os.makedirs(os.path.join(opt['outf'], 'pred_z_adata/'))
     pred_z_adata.write_h5ad(
-        os.path.join(opt['outf'], '/pred_z_adata', f'scpGAN_pred_z_{opt["prediction_type"]}.h5ad'))
+        os.path.join(opt['outf'], 'pred_z_adata/', f'scpGAN_pred_z_{opt["prediction_type"]}.h5ad'))
 
 
 def main(data_name):
     if data_name == 'pbmc':
         opt = {
             'cuda': True,
-            'dataPath': '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD19.h5ad', # CD14 / CD19
+            'dataPath': '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD14.h5ad', # CD14 / CD19
             'checkpoint_dir': None, #'scPreGANac_chkp_cd19/', # cd14 / cd19
             'condition_key': 'KO_noKO',
             'condition': {"case": "KO", "control": "noKO"},
@@ -664,13 +664,13 @@ def main(data_name):
             'manual_seed': 3060,
             'data_name': 'pbmc',
             'model_name': 'pbmc_OOD',
-            'outf': 'scPreGANac_predcd19_temp/', # cd14 / cd19
+            'outf': 'scPreGANac_predcd14/', # cd14 / cd19
             'validation': False,
             'valid_dataPath': None,
             'use_sn': True,
             'use_wgan_div': True,
             'gan_loss': 'wgan',
-            'train_flag': True, # set to true!
+            'train_flag': False, # set to true!
             'n_classes': 8,
         }
     elif data_name == 'hpoly':

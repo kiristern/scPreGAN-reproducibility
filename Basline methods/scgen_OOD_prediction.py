@@ -8,7 +8,7 @@ from pathlib import Path
 logger = logging.getLogger("scvi.inference.autotune")
 logger.setLevel(logging.WARNING)
 
-data_path = '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD19.h5ad' # CD19 / CD14 
+data_path = '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD14.h5ad' # CD19 / CD14 
 data_name = "pbmc"
 if data_name == "pbmc":
     # train = sc.read("datasets/train_pbmc.h5ad")

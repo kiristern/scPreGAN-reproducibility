@@ -25,8 +25,15 @@ import torch.nn.functional as F
 import scanpy as sc
 import anndata
 from scipy import sparse
+
 from ray import tune
 from ray.tune import CLIReporter
+# import pickle
+# import dill as pickle
+# import ray
+# replace pickle with dill
+# ray.serialization.set_pickle_function(dill.dumps)
+
 from util import load_anndata,label_encoder 
 
 from model.Discriminator import Discriminator_AC
@@ -257,12 +264,12 @@ def train_scPreGAN(config, opt):
 
 
         try:
-            real_A, cell_type_A = A_train_loader_it.next()
-            real_B, cell_type_B = B_train_loader_it.next()
+            real_A, cell_type_A = next(A_train_loader_it)
+            real_B, cell_type_B = next(B_train_loader_it)
         except StopIteration:
             A_train_loader_it, B_train_loader_it = iter(A_train_loader), iter(B_train_loader)
-            real_A, cell_type_A = A_train_loader_it.next()
-            real_B, cell_type_B = B_train_loader_it.next()
+            real_A, cell_type_A = next(A_train_loader_it)
+            real_B, cell_type_B = next(B_train_loader_it)
 
         if (opt['cuda']) and cuda_is_available():
             real_A = real_A.cuda()
@@ -311,12 +318,12 @@ def train_scPreGAN(config, opt):
         optimizerD_B.step()     
 
         try:
-            real_A, cell_type_A = A_train_loader_it.next()
-            real_B, cell_type_B = B_train_loader_it.next()
+            real_A, cell_type_A = next(A_train_loader_it)
+            real_B, cell_type_B = next(B_train_loader_it)
         except StopIteration:
             A_train_loader_it, B_train_loader_it = iter(A_train_loader), iter(B_train_loader)
-            real_A, cell_type_A = A_train_loader_it.next()
-            real_B, cell_type_B = B_train_loader_it.next()
+            real_A, cell_type_A = next(A_train_loader_it)
+            real_B, cell_type_B = next(B_train_loader_it)
 
         if (opt['cuda']) and cuda_is_available():
             real_A = real_A.cuda()
@@ -419,12 +426,12 @@ def train_scPreGAN(config, opt):
             with torch.no_grad():
                 for iteration_val in range(1, max_length):
                     try:
-                        cellA_val, cellA_val_type = A_valid_loader_it.next()
-                        cellB_val, cellB_val_type = B_valid_loader_it.next()
+                        cellA_val, cellA_val_type = next(A_valid_loader_it)
+                        cellB_val, cellB_val_type = next(B_valid_loader_it)
                     except StopIteration:
                         A_valid_loader_it, B_valid_loader_it = iter(A_valid_loader), iter(B_valid_loader)
-                        cellA_val, cellA_val_type = A_valid_loader_it.next()
-                        cellB_val, cellB_val_type = B_valid_loader_it.next()
+                        cellA_val, cellA_val_type = next(A_valid_loader_it)
+                        cellB_val, cellB_val_type = next(B_valid_loader_it)
 
 
                     counter += 1
@@ -640,17 +647,21 @@ def test_results(opt, num_trial, trial_i):
 
     # 读取预测的stimulated数据
     pred_path = outf + "/pred_adata/"
-    B_pred_adata = sc.read(pred_path + "pred_B.h5ad")
-    CD14_Mono_pred_adata = sc.read(pred_path + "pred_CD14+Mono.h5ad")
-    CD4T_pred_adata = sc.read(pred_path + "pred_CD4T.h5ad")
-    CD8T_pred_adata = sc.read(pred_path + "pred_CD8T.h5ad")
+    # B_pred_adata = sc.read(pred_path + "pred_B.h5ad")
+    # CD14_Mono_pred_adata = sc.read(pred_path + "pred_CD14+Mono.h5ad")
+    # CD4T_pred_adata = sc.read(pred_path + "pred_CD4T.h5ad")
+    # CD8T_pred_adata = sc.read(pred_path + "pred_CD8T.h5ad")
+    # Dendritic_pred_adata = sc.read(pred_path + "pred_Dendritic.h5ad")
+    # FCGR3A_Mono_pred_adata = sc.read(pred_path + "pred_FCGR3A+Mono.h5ad")
+    # NK_pred_adata = sc.read(pred_path + "pred_NK.h5ad")
+    B_pred_adata = sc.read(pred_path + "pred_CD19+ B.h5ad")
+    CD14_Mono_pred_adata = sc.read(pred_path + "pred_CD14+ Monocyte.h5ad")
     Dendritic_pred_adata = sc.read(pred_path + "pred_Dendritic.h5ad")
-    FCGR3A_Mono_pred_adata = sc.read(pred_path + "pred_FCGR3A+Mono.h5ad")
-    NK_pred_adata = sc.read(pred_path + "pred_NK.h5ad")
+    NK_pred_adata = sc.read(pred_path + "pred_CD56+ NK.h5ad")
 
-    pred_adata = B_pred_adata.concatenate(CD14_Mono_pred_adata, CD4T_pred_adata, CD8T_pred_adata, Dendritic_pred_adata,
-                                          FCGR3A_Mono_pred_adata, NK_pred_adata)
-
+    # pred_adata = B_pred_adata.concatenate(CD14_Mono_pred_adata, CD4T_pred_adata, CD8T_pred_adata, Dendritic_pred_adata,
+    #                                       FCGR3A_Mono_pred_adata, NK_pred_adata)
+    pred_adata = B_pred_adata.concatenate(CD14_Mono_pred_adata, Dendritic_pred_adata, NK_pred_adata)
     all_adata = adata.concatenate(pred_adata)
 
     sc.pp.neighbors(pred_adata)
@@ -672,32 +683,49 @@ def test_results(opt, num_trial, trial_i):
                frameon=False)
 
     # control数据隐向量
+    # control_z_path = outf + "/control_z_adata/"
+    # B_control_z_adata = sc.read(control_z_path + "control_z_B.h5ad")
+    # CD14_Mono_control_z_adata = sc.read(control_z_path + "control_z_CD14+Mono.h5ad")
+    # CD4T_control_z_adata = sc.read(control_z_path + "control_z_CD4T.h5ad")
+    # CD8T_control_z_adata = sc.read(control_z_path + "control_z_CD8T.h5ad")
+    # Dendritic_control_z_adata = sc.read(control_z_path + "control_z_Dendritic.h5ad")
+    # FCGR3A_Mono_control_z_adata = sc.read(control_z_path + "control_z_FCGR3A+Mono.h5ad")
+    # NK_control_z_adata = sc.read(control_z_path + "control_z_NK.h5ad")
+    
     control_z_path = outf + "/control_z_adata/"
-    B_control_z_adata = sc.read(control_z_path + "control_z_B.h5ad")
-    CD14_Mono_control_z_adata = sc.read(control_z_path + "control_z_CD14+Mono.h5ad")
-    CD4T_control_z_adata = sc.read(control_z_path + "control_z_CD4T.h5ad")
-    CD8T_control_z_adata = sc.read(control_z_path + "control_z_CD8T.h5ad")
+    B_control_z_adata = sc.read(control_z_path + "control_z_CD19+ B.h5ad")
+    CD14_Mono_control_z_adata = sc.read(control_z_path + "control_z_CD14+ Monocyte.h5ad")
     Dendritic_control_z_adata = sc.read(control_z_path + "control_z_Dendritic.h5ad")
-    FCGR3A_Mono_control_z_adata = sc.read(control_z_path + "control_z_FCGR3A+Mono.h5ad")
-    NK_control_z_adata = sc.read(control_z_path + "control_z_NK.h5ad")
+    NK_control_z_adata = sc.read(control_z_path + "control_z_CD56+ NK.h5ad")
+    
+    # control_z = B_control_z_adata.concatenate(CD14_Mono_control_z_adata, CD4T_control_z_adata, CD8T_control_z_adata,
+    #                                           Dendritic_control_z_adata,
+    #                                           FCGR3A_Mono_control_z_adata, NK_control_z_adata)
 
-    control_z = B_control_z_adata.concatenate(CD14_Mono_control_z_adata, CD4T_control_z_adata, CD8T_control_z_adata,
+    control_z = B_control_z_adata.concatenate(CD14_Mono_control_z_adata,
                                               Dendritic_control_z_adata,
-                                              FCGR3A_Mono_control_z_adata, NK_control_z_adata)
-
+                                              NK_control_z_adata)
+    
     # 预测数据隐向量
     pred_z_path = outf + "/pred_z_adata/"
-    B_pred_z_adata = sc.read(pred_z_path + "pred_z_B.h5ad")
-    CD14_Mono_pred_z_adata = sc.read(pred_z_path + "pred_z_CD14+Mono.h5ad")
-    CD4T_pred_z_adata = sc.read(pred_z_path + "pred_z_CD4T.h5ad")
-    CD8T_pred_z_adata = sc.read(pred_z_path + "pred_z_CD8T.h5ad")
+    # B_pred_z_adata = sc.read(pred_z_path + "pred_z_B.h5ad")
+    # CD14_Mono_pred_z_adata = sc.read(pred_z_path + "pred_z_CD14+Mono.h5ad")
+    # CD4T_pred_z_adata = sc.read(pred_z_path + "pred_z_CD4T.h5ad")
+    # CD8T_pred_z_adata = sc.read(pred_z_path + "pred_z_CD8T.h5ad")
+    # Dendritic_pred_z_adata = sc.read(pred_z_path + "pred_z_Dendritic.h5ad")
+    # FCGR3A_Mono_pred_z_adata = sc.read(pred_z_path + "pred_z_FCGR3A+Mono.h5ad")
+    # NK_pred_z_adata = sc.read(pred_z_path + "pred_z_NK.h5ad")
+    B_pred_z_adata = sc.read(pred_z_path + "pred_z_CD19+ B.h5ad")
+    CD14_Mono_pred_z_adata = sc.read(pred_z_path + "pred_z_CD14+ Monocyte.h5ad")
     Dendritic_pred_z_adata = sc.read(pred_z_path + "pred_z_Dendritic.h5ad")
-    FCGR3A_Mono_pred_z_adata = sc.read(pred_z_path + "pred_z_FCGR3A+Mono.h5ad")
-    NK_pred_z_adata = sc.read(pred_z_path + "pred_z_NK.h5ad")
+    NK_pred_z_adata = sc.read(pred_z_path + "pred_z_CD56+ NK.h5ad")
 
-    pred_z = B_pred_z_adata.concatenate(CD14_Mono_pred_z_adata, CD4T_pred_z_adata, CD8T_pred_z_adata,
+    # pred_z = B_pred_z_adata.concatenate(CD14_Mono_pred_z_adata, CD4T_pred_z_adata, CD8T_pred_z_adata,
+    #                                     Dendritic_pred_z_adata,
+    #                                     FCGR3A_Mono_pred_z_adata, NK_pred_z_adata)
+    pred_z = B_pred_z_adata.concatenate(CD14_Mono_pred_z_adata,
                                         Dendritic_pred_z_adata,
-                                        FCGR3A_Mono_pred_z_adata, NK_pred_z_adata)
+                                        NK_pred_z_adata)
 
     pred_control_z = control_z.concatenate(pred_z)
 
@@ -782,7 +810,9 @@ def test_results(opt, num_trial, trial_i):
 
 def train_whole(config, opt):
     adata = sc.read(opt['dataPath'])
-    cell_type_list = adata.obs[opt['cell_type_key']].unique().tolist()
+    # cell_type_list = adata.obs[opt['cell_type_key']].unique().tolist()
+    cell_type_list = ['CD14+ Monocyte', 'CD19+ B', 'Dendritic', 'CD56+ NK']
+
     print("cell type list: " + str(cell_type_list))
     for cell_type in cell_type_list:
         # print("=================" + cell_type + "=========================")
@@ -796,26 +826,48 @@ def main(data_name, num_samples=10, gpus_per_trial=0):
     #os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
     if data_name == 'pbmc':
+        # opt = {
+        #     'cuda': True,
+        #     'dataPath': '/home/wxj/scPreGAN-reproducibility/datasets/pbmc/pbmc-2000hvg.h5ad',
+        #     'checkpoint_dir': None,
+        #     'condition_key': 'condition',
+        #     'condition': {"case": "stimulated", "control": "control"},
+        #     'cell_type_key': 'cell_type',
+        #     'prediction_type': None,
+        #     'out_sample_prediction': True,
+        #     'manual_seed': 3060,
+        #     'data_name': 'pbmc',
+        #     'model_name': 'pbmc_OOD_2000hvg_re',
+        #     'outf': '/home/wxj/scPreGAN-reproducibility/datasets/pbmc/pbmc_OOD_AC_layer_S',
+        #     'validation': False,
+        #     'valid_dataPath': None,
+        #     'use_sn': True,
+        #     'use_wgan_div': True,
+        #     'gan_loss': 'wgan',
+        #     'train_flag': False,
+        #     'n_classes': 7,
+        # }
         opt = {
             'cuda': True,
-            'dataPath': '/home/wxj/scPreGAN-reproducibility/datasets/pbmc/pbmc-2000hvg.h5ad',
-            'checkpoint_dir': None,
-            'condition_key': 'condition',
-            'condition': {"case": "stimulated", "control": "control"},
-            'cell_type_key': 'cell_type',
+            # 'dataPath': '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD19.h5ad', # CD14 / CD19
+            'dataPath': 'C:\\Users\\kiria\\Desktop\\COMBINE_lab\\data\\mlp_PBMC_seed42_1028-152104\\train_pairedSplitCD19.h5ad',
+            'checkpoint_dir': None, #'scPreGANac_chkp_cd19/', # cd14 / cd19
+            'condition_key': 'KO_noKO',
+            'condition': {"case": "KO", "control": "noKO"},
+            'cell_type_key': 'celltype',
             'prediction_type': None,
             'out_sample_prediction': True,
             'manual_seed': 3060,
             'data_name': 'pbmc',
-            'model_name': 'pbmc_OOD_2000hvg_re',
-            'outf': '/home/wxj/scPreGAN-reproducibility/datasets/pbmc/pbmc_OOD_AC_layer_S',
+            'model_name': 'pbmc_OOD',
+            'outf': 'scPreGANac_tunecd19/', # cd14 / cd19
             'validation': False,
             'valid_dataPath': None,
             'use_sn': True,
             'use_wgan_div': True,
             'gan_loss': 'wgan',
-            'train_flag': False,
-            'n_classes': 7,
+            'train_flag': True, # set to true!
+            'n_classes': 8,
         }
     else:
         NotImplementedError()
@@ -841,7 +893,7 @@ def main(data_name, num_samples=10, gpus_per_trial=0):
         "batch_size": tune.choice([64]),
         "z_dim": tune.choice([16, 32, 64, 128]),
         # "z_dim": tune.choice([16]),
-        "niter": tune.choice([20000]
+        "niter": tune.choice([1000]
         )
     }
 
