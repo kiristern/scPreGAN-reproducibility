@@ -18,16 +18,16 @@ if data_name == 'pbmc':
     cell_type_key = 'celltype'
     condition_key = 'KO_noKO'
     condition = {"case": "KO", "control": "noKO"}
-elif data_name == 'hpoly':
-    adata = sc.read_h5ad("/home/wxj/scBranchGAN/datasets/Hpoly/hpoly.h5ad")
-    cell_type_key = 'cell_label'
-    condition_key = 'condition'
-    condition = {"case": "Hpoly.Day10", "control": "Control"}
-elif data_name == 'species':
-    adata = sc.read_h5ad("/home/wxj/scBranchGAN/datasets/species/species.h5ad")
-    cell_type_key = 'species'
-    condition_key = 'condition'
-    condition = {"case": "LPS6", "control": "unst"}
+# elif data_name == 'hpoly':
+#     adata = sc.read_h5ad("/home/wxj/scBranchGAN/datasets/Hpoly/hpoly.h5ad")
+#     cell_type_key = 'cell_label'
+#     condition_key = 'condition'
+#     condition = {"case": "Hpoly.Day10", "control": "Control"}
+# elif data_name == 'species':
+#     adata = sc.read_h5ad("/home/wxj/scBranchGAN/datasets/species/species.h5ad")
+#     cell_type_key = 'species'
+#     condition_key = 'condition'
+#     condition = {"case": "LPS6", "control": "unst"}
 else:
     raise Exception("InValid data name")
 
@@ -45,12 +45,47 @@ for cell_type in cell_type_list:
     train_condition = OneHotEncoder(sparse=False).fit_transform(train_condition.reshape(-1, 1))
     train_labels = np.array(train_set.obs[cell_type_key].tolist())
     train_labels = OneHotEncoder(sparse=False).fit_transform(train_labels.reshape(-1, 1))
+    
+    # https://github.com/NRshka/stvae-source/blob/master/notebooks/using/training.ipynb
     cfg = stvae.Config()
     cfg.epochs = 100
-    cfg.input_dim = train_expr.shape[1]
+    cfg.input_dim = train_expr.shape[1] # n_top_genes
     cfg.n_genes = train_expr.shape[1]
     cfg.count_labels = train_labels.shape[1]
     cfg.count_classes = train_condition.shape[1]
+    
+    cfg.noise_beta= 0.1
+    cfg.decay_beta= 1.
+    cfg.clip_value= 1.
+    cfg.vae_lr = 0.001
+    cfg.vae_decay = 1e-3
+    cfg.disc_lr = 1e-4
+    cfg.disc_decay = 0.
+    cfg.vae_beta = 2e-5
+    cfg.adv_weight = 0.0000001
+    cfg.cyclic_weight = 0.2
+    cfg.mmd_weight = 0
+    cfg.l1_weight = 0#.5
+    cfg.kernel_mu = 0.4
+    cfg.model_scheduler_gamma = 0.992
+    cfg.discr_scheduler_gamma = 0.992
+    cfg.n_layers = 2
+    cfg.scale_alpha = 1.3
+    cfg.form_consistency_weight = 0.2
+
+    cfg.bottleneck = 30
+    # cfg.batch_size = 128
+    # cfg.num_workers = 20
+    cfg.activation = 'mish'
+    cfg.condition_latent_dim = 10
+
+    cfg.classifier_hidden_size = 512
+    cfg.classifier_epochs = 200
+    cfg.celltype_clf_lr = 1e-5
+    cfg.form_clf_lr = 3e-4
+    cfg.celltype_clf_wdecay = 0#weight decay
+    cfg.form_clf_wdecay = 0#weight decay
+    
     model = stvae.stVAE(cfg)
     indices = np.array(train_expr.shape[0] * [0])
     test_size = 2
@@ -70,9 +105,9 @@ for cell_type in cell_type_list:
 
     if (data_name == 'pbmc') or (data_name == 'hpoly'):
         source_classes = np.zeros(shape=(ge_transfer_raw.shape[0], 2))
-        source_classes[:, 0] = 1
+        source_classes[:, 1] = 1
         target_classes = np.zeros(shape=(ge_transfer_raw.shape[0], 2))
-        target_classes[:, 1] = 1
+        target_classes[:, 0] = 1
     elif (data_name == 'species') or (data_name == 'covid-19-pbmc'):
         source_classes = np.zeros(shape=(ge_transfer_raw.shape[0], 2))
         source_classes[:, 1] = 1

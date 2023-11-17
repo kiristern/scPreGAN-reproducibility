@@ -28,11 +28,6 @@ from scipy import sparse
 
 from ray import tune
 from ray.tune import CLIReporter
-# import pickle
-# import dill as pickle
-# import ray
-# replace pickle with dill
-# ray.serialization.set_pickle_function(dill.dumps)
 
 from util import load_anndata,label_encoder 
 
@@ -619,29 +614,30 @@ def test_results(opt, num_trial, trial_i):
         control_z_adata = anndata.AnnData(X=control_z.cpu().detach().numpy(),
                                           obs={opt['condition_key']: ["control_z"] * len(control_z),
                                                opt['cell_type_key']: control_adata.obs[opt['cell_type_key']].tolist()})
-
-        if not os.path.exists(os.path.join(outf, 'control_z_adata')):
-            os.makedirs(os.path.join(outf, 'control_z_adata'))
-        control_z_adata.write_h5ad(os.path.join(outf, 'control_z_adata', f'control_z_{opt["prediction_type"]}.h5ad'))
+        
+        save_ctrl_z_path = os.path.join(outf, 'control_z_adata')
+        os.makedirs(save_ctrl_z_path, exist_ok=True)
+        control_z_adata.write_h5ad(f"{save_ctrl_z_path}/control_z_{opt['prediction_type']}.h5ad")
 
         # 预测数据
         pred_perturbed_adata = anndata.AnnData(X=case_pred.cpu().detach().numpy(),
                                                obs={opt['condition_key']: ["pred_perturbed"] * len(case_pred),
                                                     opt['cell_type_key']: control_adata.obs[opt['cell_type_key']].tolist()})
         pred_perturbed_adata.var_names = adata.var_names
-        if not os.path.exists(os.path.join(outf, 'pred_adata')):
-            os.makedirs(os.path.join(outf, 'pred_adata'))
-        pred_perturbed_adata.write_h5ad(os.path.join(outf, 'pred_adata', f'pred_{opt["prediction_type"]}.h5ad'))
+        
+        pred_perturbed_save_path = os.path.join(outf, 'pred_adata')
+        os.makedirs(pred_perturbed_save_path, exist_ok=True)
+        pred_perturbed_adata.write_h5ad(f"{pred_perturbed_save_path}/pred_{opt['prediction_type']}.h5ad")
 
         # 预测数据的隐向量
         pred_z = E(case_pred)
         pred_z_adata = anndata.AnnData(X=pred_z.cpu().detach().numpy(),
                                        obs={opt['condition_key']: ["pred_z"] * len(pred_z),
                                             opt['cell_type_key']: pred_perturbed_adata.obs[opt['cell_type_key']].tolist()})
-        if not os.path.exists(os.path.join(outf, 'pred_z_adata')):
-            os.makedirs(os.path.join(outf, 'pred_z_adata'))
-        pred_z_adata.write_h5ad(
-            os.path.join(outf, 'pred_z_adata', f'pred_z_{opt["prediction_type"]}.h5ad'))
+        
+        pred_z_save_path = os.path.join(outf, 'pred_z_adata')
+        os.makedirs(pred_z_save_path, exist_ok=True)
+        pred_z_adata.write_h5ad(f"{pred_z_save_path}/pred_{opt['prediction_type']}.h5ad")
 
     # 读取数据并组合在一起计算各个指标
 
@@ -850,8 +846,9 @@ def main(data_name, num_samples=10, gpus_per_trial=0):
         opt = {
             'cuda': True,
             # 'dataPath': '../data/mlp_PBMC_seed42_1028-152104/train_pairedSplitCD19.h5ad', # CD14 / CD19
-            'dataPath': 'C:\\Users\\kiria\\Desktop\\COMBINE_lab\\data\\mlp_PBMC_seed42_1028-152104\\train_pairedSplitCD19.h5ad',
-            'checkpoint_dir': None, #'scPreGANac_chkp_cd19/', # cd14 / cd19
+            # 'dataPath': 'C:\\Users\\kiria\\Desktop\\COMBINE_lab\\data\\mlp_PBMC_seed42_1028-152104\\train_pairedSplitCD19.h5ad',
+            'dataPath': '.\\datasets\\train_pairedSplitCD19.h5ad',
+            'checkpoint_dir': 'scpg_tune_chkp_cd19/', # cd14 / cd19
             'condition_key': 'KO_noKO',
             'condition': {"case": "KO", "control": "noKO"},
             'cell_type_key': 'celltype',
